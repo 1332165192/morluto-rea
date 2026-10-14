@@ -68,13 +68,34 @@ export const selectWiresharkTool = (
   return { command: configured, source: "environment" };
 };
 
-/** Resolve the caller-supplied tshark and capinfos binaries. */
+/**
+ * Resolve the caller-supplied tshark and capinfos binaries to the executables
+ * the packet tools would also select. Windows keeps PATH/PATHEXT resolution in
+ * the launcher, which the POSIX locator does not model.
+ */
 export const resolvePcapTools = (
   environment: Readonly<Record<string, string | undefined>>,
-): PcapToolSelection => ({
-  tshark: selectWiresharkTool(environment, "tshark"),
-  capinfos: selectWiresharkTool(environment, "capinfos"),
-});
+  platform: NodeJS.Platform = process.platform,
+): PcapToolSelection => {
+  // Report every configuration error before consulting PATH for either tool.
+  const selected = {
+    tshark: selectWiresharkTool(environment, "tshark"),
+    capinfos: selectWiresharkTool(environment, "capinfos"),
+  };
+  const locate = (tool: "tshark" | "capinfos"): WiresharkToolSelection => {
+    const selection = selected[tool];
+    if (selection.source === "environment" || platform === "win32")
+      return selection;
+    const command = locateWiresharkTool(selection, environment);
+    if (command === undefined)
+      throw new PcapConfigurationFailure(
+        `${tool}_missing`,
+        `${tool} was not found in an absolute PATH entry; add it to PATH or set ${TOOL_COMMAND_ENV[tool]} to its absolute path`,
+      );
+    return { command, source: "path" };
+  };
+  return { tshark: locate("tshark"), capinfos: locate("capinfos") };
+};
 
 /**
  * Locate a selected tool as an absolute executable so its identity can be

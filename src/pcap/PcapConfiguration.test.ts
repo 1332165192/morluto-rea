@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import {
@@ -10,6 +10,7 @@ import {
   locateWiresharkTool,
   parseWiresharkVersion,
   resolvePcapTools,
+  selectWiresharkTool,
 } from "./PcapConfiguration.js";
 import { parseCapinfosOutput, parseTsharkJsonOutput } from "./PcapOutput.js";
 
@@ -26,12 +27,50 @@ describe("resolvePcapTools", () => {
     });
   });
 
-  it("falls back to PATH resolution without the environment keys", () => {
-    expect(resolvePcapTools({})).toEqual({
+  it("keeps bare PATH selections for the Windows PATH/PATHEXT launcher", () => {
+    expect(resolvePcapTools({}, "win32")).toEqual({
       tshark: { command: "tshark", source: "path" },
       capinfos: { command: "capinfos", source: "path" },
     });
   });
+
+  it("fails closed when no absolute PATH entry holds the tool", () => {
+    expect(() => resolvePcapTools({ PATH: "relative-only" }, "linux")).toThrow(
+      /tshark was not found in an absolute PATH entry/u,
+    );
+  });
+
+  // Windows X_OK reports existence only, so executable-bit selection is POSIX-only.
+  it.skipIf(process.platform === "win32")(
+    "selects the same executable as the packet tools ahead of a relative PATH entry",
+    async () => {
+      const root = await createTestTempDirectory("rea-wireshark-shared-");
+      const decoy = join(root, "relative-decoy");
+      const installed = join(root, "installed");
+      for (const directory of [decoy, installed]) {
+        await mkdir(directory);
+        for (const tool of ["tshark", "capinfos"]) {
+          await writeFile(join(directory, tool), "");
+          await chmod(join(directory, tool), 0o700);
+        }
+      }
+      const environment = {
+        PATH: [relative(process.cwd(), decoy), installed].join(":"),
+      };
+
+      const pcap = resolvePcapTools(environment, "linux");
+      expect(pcap).toEqual({
+        tshark: { command: join(installed, "tshark"), source: "path" },
+        capinfos: { command: join(installed, "capinfos"), source: "path" },
+      });
+      expect(pcap.tshark.command).toBe(
+        locateWiresharkTool(
+          selectWiresharkTool(environment, "tshark"),
+          environment,
+        ),
+      );
+    },
+  );
 
   it("rejects a relative tshark path explicitly", () => {
     expect(() =>

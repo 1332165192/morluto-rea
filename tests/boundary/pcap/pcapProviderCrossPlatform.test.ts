@@ -7,7 +7,7 @@
  * refusal paths, and cancellation before spawn.
  */
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -45,6 +45,31 @@ const evidenceResult = async (
   if (!result.ok) throw new Error(result.error.message);
   return result.value.result as Record<string, unknown>;
 };
+
+// Windows keeps PATH/PATHEXT resolution in the launcher; POSIX hosts locate the file.
+it.skipIf(isWindows)(
+  "runs and reports the tools located on PATH rather than bare names",
+  async () => {
+    const directory = await createTestTempDirectory("rea-pcap-path-");
+    await symlink(tsharkStub, join(directory, "tshark"));
+    await symlink(capinfosStub, join(directory, "capinfos"));
+    const provider = new PcapProvider({
+      environment: { PATH: `relative-entry:${directory}` },
+    });
+    onTestFinished(() => provider.close());
+    const result = await evidenceResult(provider, {
+      operation: "inspect_pcap_client",
+      input: {},
+    });
+    expect(result.client).toMatchObject({
+      tshark_command: join(directory, "tshark"),
+      tshark_source: "path",
+      tshark_version: expect.stringContaining("4.6.6") as unknown,
+      capinfos_command: join(directory, "capinfos"),
+      capinfos_source: "path",
+    });
+  },
+);
 
 it("inspects both tools through cross-platform stubs", async () => {
   const result = await evidenceResult(providerOver(), {
