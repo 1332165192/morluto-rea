@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import {
   CAPINFOS_COMMAND_ENV,
   TSHARK_COMMAND_ENV,
+  locateWiresharkTool,
+  parseWiresharkVersion,
   resolvePcapTools,
 } from "./PcapConfiguration.js";
 import { parseCapinfosOutput, parseTsharkJsonOutput } from "./PcapOutput.js";
@@ -37,6 +43,78 @@ describe("resolvePcapTools", () => {
     expect(() =>
       resolvePcapTools({ [CAPINFOS_COMMAND_ENV]: "capinfos" }),
     ).toThrow(/must be an absolute path/u);
+  });
+});
+
+describe("locateWiresharkTool", () => {
+  it("keeps an environment selection as the configured absolute path", () => {
+    expect(
+      locateWiresharkTool(
+        { command: "/opt/wireshark/tshark", source: "environment" },
+        { PATH: "/usr/bin" },
+      ),
+    ).toBe("/opt/wireshark/tshark");
+  });
+
+  // Windows X_OK reports existence only, so executable-bit selection is POSIX-only.
+  it.skipIf(process.platform === "win32")(
+    "uses the first absolute PATH entry holding an executable regular file",
+    async () => {
+      const root = await createTestTempDirectory("rea-wireshark-path-");
+      const relative = join(root, "relative");
+      const notExecutable = join(root, "not-executable");
+      const directoryEntry = join(root, "directory-entry");
+      const selected = join(root, "selected");
+      const later = join(root, "later");
+      for (const directory of [notExecutable, directoryEntry, selected, later])
+        await mkdir(directory);
+      await writeFile(join(notExecutable, "tshark"), "");
+      await chmod(join(notExecutable, "tshark"), 0o600);
+      await mkdir(join(directoryEntry, "tshark"));
+      for (const directory of [selected, later]) {
+        await writeFile(join(directory, "tshark"), "");
+        await chmod(join(directory, "tshark"), 0o700);
+      }
+      const PATH = [
+        "relative-entry",
+        relative,
+        notExecutable,
+        directoryEntry,
+        selected,
+        later,
+      ].join(":");
+
+      expect(
+        locateWiresharkTool({ command: "tshark", source: "path" }, { PATH }),
+      ).toBe(join(selected, "tshark"));
+      expect(
+        locateWiresharkTool(
+          { command: "tshark", source: "path" },
+          { PATH: [relative, notExecutable, directoryEntry].join(":") },
+        ),
+      ).toBeUndefined();
+      expect(
+        locateWiresharkTool({ command: "tshark", source: "path" }, {}),
+      ).toBeUndefined();
+    },
+  );
+});
+
+describe("parseWiresharkVersion", () => {
+  it("admits Wireshark 4.x banners for either tool and rejects other majors", () => {
+    expect(
+      parseWiresharkVersion(
+        "\nTShark (Wireshark) 4.6.9 (Git v4.6.9 packaged as 4.6.9-1)\n",
+        "tshark",
+      ),
+    ).toBe("TShark (Wireshark) 4.6.9 (Git v4.6.9 packaged as 4.6.9-1)");
+    expect(
+      parseWiresharkVersion("Capinfos (Wireshark) 4.0.17\n", "capinfos"),
+    ).toBe("Capinfos (Wireshark) 4.0.17");
+    expect(parseWiresharkVersion("tcpdump 4.99.4\n", "tshark")).toBeNull();
+    expect(() =>
+      parseWiresharkVersion("TShark (Wireshark) 3.6.2\n", "tshark"),
+    ).toThrow(/requires Wireshark 4\.x/u);
   });
 });
 

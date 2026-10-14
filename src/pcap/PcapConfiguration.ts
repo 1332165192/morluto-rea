@@ -1,4 +1,5 @@
-import { isAbsolute } from "node:path";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
 import type { ProviderAvailability } from "../application/AnalysisProvider.js";
 import type { ProviderRejectionCode } from "../contracts/providerSelection.js";
@@ -27,64 +28,77 @@ export const pcapToolUnavailable = (
     userMessage: `${/[.!?]$/u.test(reason) ? reason : `${reason}.`} ${TOOL_REMEDIATION}`,
   });
 
-/** How each tool was selected for this provider instance. */
-export interface PcapToolSelection {
-  readonly tshark: { command: string; source: "environment" | "path" };
-  readonly capinfos: { command: string; source: "environment" | "path" };
+/** How one caller-supplied Wireshark tool was selected. */
+export interface WiresharkToolSelection {
+  readonly command: string;
+  readonly source: "environment" | "path";
 }
 
+/** How each tool was selected for this provider instance. */
+export interface PcapToolSelection {
+  readonly tshark: WiresharkToolSelection;
+  readonly capinfos: WiresharkToolSelection;
+}
+
+const TOOL_COMMAND_ENV = {
+  tshark: TSHARK_COMMAND_ENV,
+  capinfos: CAPINFOS_COMMAND_ENV,
+} as const;
+
 /**
- * Resolve the caller-supplied tshark and capinfos binaries. Each accepts an
- * absolute environment path or falls back to PATH resolution, mirroring the
- * mitmdump pattern. REA never installs the Wireshark suite.
+ * The one selection rule for a caller-supplied Wireshark tool: an absolute
+ * environment path, otherwise the bare tool name resolved through PATH. A
+ * relative environment value is configuration to fix, never a PATH lookup.
+ * REA never installs the Wireshark suite.
  */
+export const selectWiresharkTool = (
+  environment: Readonly<Record<string, string | undefined>>,
+  tool: "tshark" | "capinfos",
+): WiresharkToolSelection => {
+  const key = TOOL_COMMAND_ENV[tool];
+  const configured = environment[key];
+  if (configured === undefined || configured.trim() === "")
+    return { command: tool, source: "path" };
+  if (!isAbsolute(configured))
+    throw new PcapConfigurationFailure(
+      `${tool}_not_absolute`,
+      `${key} must be an absolute path to the ${tool} binary`,
+      { configured },
+    );
+  return { command: configured, source: "environment" };
+};
+
+/** Resolve the caller-supplied tshark and capinfos binaries. */
 export const resolvePcapTools = (
   environment: Readonly<Record<string, string | undefined>>,
-): PcapToolSelection => {
-  const tsharkEnv = environment[TSHARK_COMMAND_ENV];
-  const capinfosEnv = environment[CAPINFOS_COMMAND_ENV];
-  if (
-    tsharkEnv !== undefined &&
-    tsharkEnv.trim() !== "" &&
-    !isAbsolute(tsharkEnv)
-  )
-    throw new PcapConfigurationFailure(
-      "tshark_not_absolute",
-      `${TSHARK_COMMAND_ENV} must be an absolute path to the tshark binary`,
-      { configured: tsharkEnv },
-    );
-  if (
-    capinfosEnv !== undefined &&
-    capinfosEnv.trim() !== "" &&
-    !isAbsolute(capinfosEnv)
-  )
-    throw new PcapConfigurationFailure(
-      "capinfos_not_absolute",
-      `${CAPINFOS_COMMAND_ENV} must be an absolute path to the capinfos binary`,
-      { configured: capinfosEnv },
-    );
-  return {
-    tshark: {
-      command:
-        tsharkEnv === undefined || tsharkEnv.trim() === ""
-          ? "tshark"
-          : tsharkEnv,
-      source:
-        tsharkEnv === undefined || tsharkEnv.trim() === ""
-          ? "path"
-          : "environment",
-    },
-    capinfos: {
-      command:
-        capinfosEnv === undefined || capinfosEnv.trim() === ""
-          ? "capinfos"
-          : capinfosEnv,
-      source:
-        capinfosEnv === undefined || capinfosEnv.trim() === ""
-          ? "path"
-          : "environment",
-    },
-  };
+): PcapToolSelection => ({
+  tshark: selectWiresharkTool(environment, "tshark"),
+  capinfos: selectWiresharkTool(environment, "capinfos"),
+});
+
+/**
+ * Locate a selected tool as an absolute executable so its identity can be
+ * hashed. Environment selections are already absolute. PATH selections use the
+ * first absolute PATH entry holding an executable regular file; relative PATH
+ * entries are skipped because they would depend on the working directory.
+ * Returns undefined when PATH holds no such executable.
+ */
+export const locateWiresharkTool = (
+  selection: WiresharkToolSelection,
+  environment: Readonly<Record<string, string | undefined>>,
+): string | undefined => {
+  if (selection.source === "environment") return selection.command;
+  for (const directory of (environment.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
+    const candidate = join(directory, selection.command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Absent or non-executable candidates leave later PATH entries eligible.
+    }
+  }
+  return undefined;
 };
 
 export type PcapConfigurationFailureCode =
@@ -108,8 +122,11 @@ export class PcapConfigurationFailure extends Error {
   }
 }
 
-/** Recognize the selected Wireshark tool's version banner. */
-const parseVersion = (
+/**
+ * Recognize the selected Wireshark tool's version banner: null when the first
+ * line is not a Wireshark banner, a failure when its major version is not 4.
+ */
+export const parseWiresharkVersion = (
   stdout: string,
   tool: "tshark" | "capinfos",
 ): string | null => {
@@ -127,7 +144,7 @@ const parseVersion = (
   if (parsed[1] !== "4")
     throw new PcapConfigurationFailure(
       `${tool}_version_unsupported`,
-      "Packet summary inspection currently requires Wireshark 4.x tools; select an installation with the admitted output profile.",
+      "Packet capture inspection currently requires Wireshark 4.x tools; select an installation with the admitted output profile.",
       { version: line },
     );
   return line;
@@ -143,8 +160,11 @@ export const inspectPcapClient = async (
   selection: PcapToolSelection,
   probe: (command: string) => Promise<string>,
 ): Promise<PcapClientIdentity> => ({
-  tsharkVersion: parseVersion(await probe(selection.tshark.command), "tshark"),
-  capinfosVersion: parseVersion(
+  tsharkVersion: parseWiresharkVersion(
+    await probe(selection.tshark.command),
+    "tshark",
+  ),
+  capinfosVersion: parseWiresharkVersion(
     await probe(selection.capinfos.command),
     "capinfos",
   ),
