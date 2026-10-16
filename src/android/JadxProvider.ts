@@ -27,20 +27,27 @@ import {
   snapshotAndroidEngine,
   snapshotAndroidTarget,
 } from "./AndroidTargetSnapshot.js";
-import { hashStableFile } from "../filesystem/StableFileHash.js";
+import {
+  hashStableFile,
+  stableFileHashCause,
+  StableFileHashFailure,
+} from "../filesystem/StableFileHash.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { RegularFileChangedError } from "../filesystem/RegularFile.js";
-import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
+import {
+  RegularFileCleanupFailure,
+  regularFileCancellation,
+} from "../filesystem/OwnedRegularFile.js";
 import {
   inspectJadxAvailability,
   resolveJadxConfigurationInputs,
+  resolveJadxOperationTimeout,
   validateJadxConfiguration,
 } from "./JadxConfiguration.js";
 import type { JadxLauncher } from "./JadxMcpTransport.js";
 
 import { JadxSession } from "./JadxSession.js";
 
-const OPERATION_TIMEOUT_MS = 120_000;
 const BRIDGE_SOURCE = fileURLToPath(
   new URL("../../bridge/android/ReaJadxBridge.java", import.meta.url),
 );
@@ -65,39 +72,38 @@ const executionError = (context: {
   cause: unknown;
   request: AndroidRequest;
   timeout: AbortSignal;
+  timeoutMs: number;
   signal: AbortSignal | undefined;
   session: JadxSession | undefined;
 }): AnalysisError => {
-  const { cause, request, timeout, signal, session } = context;
+  const { cause, request, timeout, timeoutMs, signal, session } = context;
+  const cancellation = regularFileCancellation(cause);
+  const cancellationError =
+    cancellation === undefined
+      ? undefined
+      : timeout.aborted && cancellation.reason === timeout.reason
+        ? new AnalysisTimeoutError(request.operation, timeoutMs, {
+            cause: cancellation.reason,
+          })
+        : new AnalysisCancelledError(request.operation, {
+            cause: cancellation.reason,
+          });
   if (cause instanceof RegularFileCleanupFailure) {
     const primaryCause =
       cause.outcome.kind === "failed"
-        ? cause.outcome.cause
-        : signal?.aborted
-          ? signal.reason
-          : timeout.aborted
-            ? timeout.reason
-            : undefined;
-    const primaryOptions =
-      primaryCause === undefined ? {} : { cause: primaryCause };
+        ? stableFileHashCause(cause.outcome.cause)
+        : cause;
     const primary =
-      signal?.aborted === true
-        ? new AnalysisCancelledError(request.operation, primaryOptions)
-        : timeout.aborted
-          ? new AnalysisTimeoutError(
-              request.operation,
-              OPERATION_TIMEOUT_MS,
-              primaryOptions,
-            )
-          : primaryCause instanceof AnalysisError
-            ? primaryCause
-            : new ProviderAdapterError("jadx", request.operation, {
-                cause: primaryCause ?? cause,
-                userMessage:
-                  primaryCause instanceof Error
-                    ? primaryCause.message
-                    : cause.message,
-              });
+      cancellationError ??
+      (primaryCause instanceof AnalysisError
+        ? primaryCause
+        : new ProviderAdapterError("jadx", request.operation, {
+            cause: primaryCause,
+            userMessage:
+              primaryCause instanceof Error
+                ? primaryCause.message
+                : String(primaryCause),
+          }));
     const cleanup = new ProviderCleanupError(
       "jadx",
       [cause.path],
@@ -111,11 +117,17 @@ const executionError = (context: {
     );
     return analysisErrorWithCleanupFailure(primary, cleanup, request.operation);
   }
+  if (cancellationError !== undefined) return cancellationError;
+  if (cause instanceof StableFileHashFailure)
+    return new ProviderAdapterError("jadx", request.operation, {
+      cause: cause.cause,
+      userMessage: cause.message,
+    });
+  if (cause instanceof AnalysisError) return cause;
   if (signal?.aborted === true)
     return new AnalysisCancelledError(request.operation, { cause });
   if (timeout.aborted)
-    return new AnalysisTimeoutError(request.operation, OPERATION_TIMEOUT_MS);
-  if (cause instanceof AnalysisError) return cause;
+    return new AnalysisTimeoutError(request.operation, timeoutMs);
   const protocolFailure = session?.transport.failureReason();
   if (protocolFailure !== undefined && protocolFailure !== null)
     return new AnalysisOutputError(request.operation, protocolFailure, {
@@ -192,9 +204,9 @@ const hashAndroidSource = async (
   try {
     return (await hashStableFile(path, { signal, retainFailedClose })).sha256;
   } catch (cause: unknown) {
-    if (signal.aborted) throw cause;
-    if (cause instanceof RegularFileChangedError)
-      throw androidSourceChanged(operation, path, cause);
+    const physical = stableFileHashCause(cause);
+    if (physical instanceof RegularFileChangedError)
+      throw androidSourceChanged(operation, path, physical);
     throw cause;
   }
 };
@@ -440,7 +452,14 @@ export class JadxProvider implements AndroidAnalysisPort {
     request: AndroidRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
-    const timeout = AbortSignal.timeout(OPERATION_TIMEOUT_MS);
+    // The deadline is fixed per provider environment; an unusable value is
+    // refused before any file handle, workspace, or engine is acquired.
+    const timeoutMs = resolveJadxOperationTimeout(
+      this.environment,
+      request.operation,
+    );
+    if (!timeoutMs.ok) return timeoutMs;
+    const timeout = AbortSignal.timeout(timeoutMs.value);
     const signal =
       options?.signal === undefined
         ? timeout
@@ -596,6 +615,7 @@ export class JadxProvider implements AndroidAnalysisPort {
           jarHash: retained.jarHash,
           bridgeHash: retained.bridgeHash,
           signal: activeSignal,
+          timeoutMs: timeoutMs.value,
         }),
       );
       activeSignal.throwIfAborted();
@@ -606,6 +626,7 @@ export class JadxProvider implements AndroidAnalysisPort {
         cause,
         request,
         timeout,
+        timeoutMs: timeoutMs.value,
         signal: options?.signal,
         session,
       });
