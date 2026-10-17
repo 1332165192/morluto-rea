@@ -499,6 +499,8 @@ const workflowAvailabilityFor = ({
         };
   if (name === "inspect_pe_resources")
     return { reason: "available", remediation: null };
+  if (name === "inspect_pe_certificates")
+    return { reason: "available", remediation: null };
   if (name === "inspect_evm_interface") {
     if (policy.evmInterfaceEnabled !== true)
       return {
