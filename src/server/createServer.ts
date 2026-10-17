@@ -12,8 +12,15 @@ import { wasmArtifactModule } from "../composition/wasm.js";
 import { registerWasmTools } from "./registerWasmTools.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { captureProviderEnvironment } from "./providerEnvironment.js";
-import { createPeResourcesService } from "../composition/binaryDiagnostics.js";
+import {
+  createBinaryLayoutService,
+  createPeCertificatesService,
+  createPeResourcesService,
+  createRecordedCrashService,
+} from "../composition/binaryDiagnostics.js";
+import type { PeCertificatesService } from "../application/binaryDiagnostics/PeCertificatesService.js";
 import type { PeResourcesService } from "../application/binaryDiagnostics/PeResourcesService.js";
+import { registerPeCertificatesTool } from "./registerPeCertificatesTool.js";
 import { registerPeResourcesTool } from "./registerPeResourcesTool.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
 import {
@@ -25,7 +32,6 @@ import type { SqliteDatabaseService } from "../application/sqlite/SqliteDatabase
 import { createSqliteDatabaseService } from "../composition/sqlite.js";
 import { registerSqliteTools } from "./registerSqliteTools.js";
 import { registerRecordedCrashTools } from "./registerRecordedCrashTools.js";
-import { createRecordedCrashService } from "../composition/binaryDiagnostics.js";
 import { createDesktopApplicationService } from "../composition/desktop.js";
 import { registerDesktopApplicationTool } from "./registerDesktopApplicationTool.js";
 import { createGoBinaryService } from "../composition/go.js";
@@ -46,7 +52,6 @@ import { registerAnalysisViewTool } from "./registerAnalysisViewTool.js";
 import { registerBinaryDiagnosticsTools } from "./registerBinaryDiagnosticsTools.js";
 import { FridaInstrumentationManager } from "../frida/FridaInstrumentationManager.js";
 import { registerFridaTools } from "./registerFridaTools.js";
-import { createBinaryLayoutService } from "../composition/binaryDiagnostics.js";
 import type { BinaryLayoutService } from "../application/binaryDiagnostics/BinaryLayoutService.js";
 import { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 import {
@@ -338,6 +343,7 @@ export const createServer = (
   const il2cppMetadata =
     options.il2cppMetadata ?? createIl2cppMetadataService();
   const peResources = createPeResourcesService();
+  const peCertificates = createPeCertificatesService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const webNetworkCapture =
     options.webNetworkCapture ?? createWebNetworkCaptureService(environment);
@@ -425,6 +431,7 @@ export const createServer = (
       modelArtifact.close(),
       gpuCodeObjects.close(),
       peResources.close(),
+      peCertificates.close(),
       electronFuses.close(),
       webNetworkCapture.close(),
       javascriptRecovery.close?.() ?? Promise.resolve(),
@@ -488,6 +495,7 @@ export const createServer = (
     rustBinary,
     il2cppMetadata,
     peResources,
+    peCertificates,
     electronFuses,
     webNetworkCapture,
   };
@@ -719,6 +727,7 @@ const registerConfiguredAnalysisTools = (
     rustBinary,
     il2cppMetadata,
     peResources,
+    peCertificates,
     webNetworkCapture,
     artifactResources,
   }: ServerToolContext,
@@ -763,6 +772,13 @@ const registerConfiguredAnalysisTools = (
   registerPeResourcesTool(
     server,
     peResources,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerPeCertificatesTool(
+    server,
+    peCertificates,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -900,6 +916,7 @@ interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly rustBinary: RustBinaryService;
   readonly il2cppMetadata: Il2cppMetadataService;
   readonly peResources: PeResourcesService;
+  readonly peCertificates: PeCertificatesService;
   readonly electronFuses: ElectronFuseService;
   readonly webNetworkCapture: WebNetworkCaptureService;
   readonly artifactResources: ArtifactResourceScope;
