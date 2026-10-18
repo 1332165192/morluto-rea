@@ -10,6 +10,7 @@ import {
   parsePkcs7SignedData,
   PeCertificateDerFailure,
 } from "./PeCertificateDer.js";
+import { readPeHeaders } from "./PeResourceLayout.js";
 
 const fail = (message: string): never => {
   throw new ArtifactReaderFailure("format", message);
@@ -49,28 +50,10 @@ export const parsePeCertificates = (
   artifact: PeCertificates["artifact"],
   input: InspectPeCertificatesInput,
 ): PeCertificates => {
-  requireRange(bytes, 0, 64);
-  if (bytes.readUInt16LE(0) !== 0x5a4d) fail("Expected an MZ PE image.");
-  const pe = bytes.readUInt32LE(60);
-  requireRange(bytes, pe, 24);
-  if (bytes.readUInt32LE(pe) !== 0x4550) fail("Expected a PE signature.");
+  const { pe, optional, magic, directoriesAt, directoryCount, headerSize } =
+    readPeHeaders(bytes);
   const machine = bytes.readUInt16LE(pe + 4);
-  const optionalSize = bytes.readUInt16LE(pe + 20);
-  const optional = pe + 24;
-  requireRange(bytes, optional, optionalSize);
-  if (optionalSize < 64) fail("Truncated PE optional header.");
-  const magic = bytes.readUInt16LE(optional);
-  if (magic !== 0x10b && magic !== 0x20b)
-    fail("Unsupported PE optional header magic.");
   const format = magic === 0x20b ? "pe32-plus" : "pe32";
-  const countAt = magic === 0x10b ? 92 : 108;
-  const directoriesAt = countAt + 4;
-  if (optionalSize < directoriesAt) fail("Truncated PE data directory count.");
-  const directoryCount = bytes.readUInt32LE(optional + countAt);
-  if (directoryCount > Math.floor((optionalSize - directoriesAt) / 8))
-    fail("PE directory count exceeds its optional header.");
-  const headerSize = bytes.readUInt32LE(optional + 60);
-  if (headerSize > bytes.length) fail("Invalid PE SizeOfHeaders.");
   const securityIndex = 4;
   if (directoryCount <= securityIndex) {
     return {

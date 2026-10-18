@@ -42,14 +42,28 @@ const fail = (message: string): never => {
 const required = <T>(value: T | undefined, message: string): T =>
   value === undefined ? fail(message) : value;
 
+// Authenticode signatures with full chains and countersignatures decode to a
+// few thousand nodes; the budget bounds sibling fan-out, which depth does not.
+export const DER_NODE_BUDGET = 16_384;
+
+interface DerBudget {
+  remaining: number;
+}
+
 /** Decode one DER/BER TLV; constructed nodes own their child sequence. */
 export const readDer = (
   bytes: Buffer,
   offset = 0,
   end = bytes.length,
   depth = 0,
+  budget: DerBudget = { remaining: DER_NODE_BUDGET },
 ): DerNode => {
   if (depth > 32) return fail("DER nesting exceeds 32 levels.");
+  if (budget.remaining <= 0)
+    return fail(
+      `DER value count exceeds the ${String(DER_NODE_BUDGET)}-node budget.`,
+    );
+  budget.remaining -= 1;
   if (offset >= end || offset + 2 > end)
     return fail("Truncated DER tag or length.");
   const tag = required(bytes[offset], "Truncated DER tag.");
@@ -77,7 +91,7 @@ export const readDer = (
   if (constructed) {
     let at = cursor;
     while (at < contentEnd) {
-      const child = readDer(bytes, at, contentEnd, depth + 1);
+      const child = readDer(bytes, at, contentEnd, depth + 1, budget);
       children.push(child);
       at = child.end;
     }
@@ -97,19 +111,23 @@ export const oidName = (oid: string): string | null => OID_NAMES[oid] ?? null;
 /** Decode an OBJECT IDENTIFIER content buffer as dotted decimal. */
 export const decodeOid = (content: Buffer): string => {
   if (content.length === 0) return fail("Empty OBJECT IDENTIFIER.");
-  const first = required(content[0], "Empty OBJECT IDENTIFIER.");
-  const parts = [Math.floor(first / 40), first % 40];
-  let value = 0;
-  for (let index = 1; index < content.length; index += 1) {
+  // Arcs are unbounded base-128 integers; the first encoded value combines
+  // the first two arcs and can itself span several bytes (2.999 -> 1079).
+  const values: bigint[] = [];
+  let value = 0n;
+  for (let index = 0; index < content.length; index += 1) {
     const byte = required(content[index], "Truncated OBJECT IDENTIFIER.");
-    value = (value << 7) | (byte & 0x7f);
+    value = (value << 7n) | BigInt(byte & 0x7f);
     if ((byte & 0x80) === 0) {
-      parts.push(value);
-      value = 0;
+      values.push(value);
+      value = 0n;
     } else if (index === content.length - 1)
       return fail("Truncated OBJECT IDENTIFIER component.");
   }
-  return parts.join(".");
+  const [combined, ...rest] = values;
+  if (combined === undefined) return fail("Empty OBJECT IDENTIFIER.");
+  const first = combined < 40n ? 0n : combined < 80n ? 1n : 2n;
+  return [first, combined - first * 40n, ...rest].join(".");
 };
 
 const decodeUtf16Be = (bytes: Buffer): string => {
@@ -120,8 +138,23 @@ const decodeUtf16Be = (bytes: Buffer): string => {
   return text;
 };
 
+const decodeUtf32Be = (bytes: Buffer): string => {
+  if (bytes.length % 4 !== 0)
+    return fail("UniversalString length is not a multiple of 4.");
+  let text = "";
+  for (let index = 0; index < bytes.length; index += 4) {
+    const codePoint = bytes.readUInt32BE(index);
+    if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff))
+      return fail("UniversalString holds an invalid code point.");
+    text += String.fromCodePoint(codePoint);
+  }
+  return text;
+};
+
 const decodePrintable = (node: DerNode): string => {
   switch (node.tag) {
+    case 0x1c:
+      return decodeUtf32Be(node.content);
     case 0x0c:
     case 0x13:
     case 0x16:
@@ -288,6 +321,13 @@ const parseSigner = (node: DerNode): ParsedSigner => {
   const signatureAlg = children[cursor];
   if (signatureAlg === undefined)
     return fail("SignerInfo is missing signatureAlgorithm.");
+  const signature = children[cursor + 1];
+  if (signature === undefined || signature.tag !== 0x04)
+    return fail("SignerInfo is missing its signature OCTET STRING.");
+  cursor += 2;
+  if (children[cursor]?.tag === 0xa1) cursor += 1;
+  if (cursor !== children.length)
+    return fail("SignerInfo has unexpected trailing fields.");
   return {
     digest_algorithm_oid: algorithmOid(digestAlg),
     signature_algorithm_oid: algorithmOid(signatureAlg),
@@ -306,19 +346,32 @@ export interface ParsedSignedData {
 
 const parseSignedData = (node: DerNode): ParsedSignedData => {
   const children = sequence(node, "SignedData");
-  const digestSet = children[1];
+  const [version, digestSet, encapContentInfo] = children;
+  if (version === undefined || version.tag !== 0x02)
+    return fail("SignedData is missing version.");
   if (digestSet === undefined || digestSet.tag !== 0x31)
     return fail("SignedData is missing digestAlgorithms.");
+  if (
+    encapContentInfo === undefined ||
+    encapContentInfo.tag !== 0x30 ||
+    encapContentInfo.children[0]?.tag !== 0x06
+  )
+    return fail("SignedData is missing encapContentInfo.");
   const digest_algorithm_oids = digestSet.children.map(algorithmOid);
-  const certificates: ParsedCertificate[] = [];
-  const signers: ParsedSigner[] = [];
-  for (const child of children.slice(3)) {
-    if (child.tag === 0xa0)
-      for (const certificate of child.children)
-        certificates.push(parseCertificate(certificate));
-    else if (child.tag === 0x31)
-      for (const signer of child.children) signers.push(parseSigner(signer));
-  }
+  // RFC 5652 order: [0] certificates, [1] crls, both optional, then the
+  // required signerInfos SET as the final field.
+  let cursor = 3;
+  const certificateSet =
+    children[cursor]?.tag === 0xa0 ? children[cursor] : undefined;
+  if (certificateSet !== undefined) cursor += 1;
+  if (children[cursor]?.tag === 0xa1) cursor += 1;
+  const signerSet = children[cursor];
+  if (signerSet === undefined || signerSet.tag !== 0x31)
+    return fail("SignedData is missing signerInfos.");
+  if (cursor !== children.length - 1)
+    return fail("SignedData has unexpected trailing fields.");
+  const certificates = (certificateSet?.children ?? []).map(parseCertificate);
+  const signers = signerSet.children.map(parseSigner);
   return {
     content_type_oid: "1.2.840.113549.1.7.2",
     digest_algorithm_oids,
