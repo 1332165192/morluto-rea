@@ -100,7 +100,11 @@ export async function verifyCoreInspectionTrace({
       // Retain only execution/thread evidence across files, not all raw traces.
       const inventory = text
         .split("\n")
-        .filter((line) => /^(?:execve|clone|<\.\.\. clone)/u.test(line))
+        .filter((line) =>
+          /^(?:execve|clone|fork|vfork|<\.\.\. (?:clone|fork|vfork))/u.test(
+            line,
+          ),
+        )
         .join("\n");
       traces.push({ pid, text: inventory, file });
     }
