@@ -47,6 +47,8 @@ export const historicalPidTraceContract = Object.freeze({
   pid_syscalls: Object.freeze([...pidTargetKinds.keys()]),
   unverified: Object.freeze([
     "legacy-cwd-relative-paths",
+    "symlink-path-aliases",
+    "same-node-thread-stat-status-purpose",
     "other-pid-directed-syscalls",
   ]),
 });
