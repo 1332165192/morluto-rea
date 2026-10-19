@@ -103,12 +103,22 @@ export function assertHistoricalPidAccess({
         pathReference.test(posix.normalize(quoted[1]))
       )
         return true;
-    // -yy resolves dirfds at the syscall boundary, including descriptor reuse.
-    // Cover failed relative lookups from /proc, which have no returned FD path.
-    const relative = /^openat\(\d+<\/proc>, "([^"]*)",/u.exec(line);
-    if (relative === null) return false;
-    const path = posix.resolve("/proc", relative[1]);
-    return path === root || path.startsWith(`${root}/`);
+    // -yy owns the current dirfd identity, including descriptor reuse. Resolve
+    // each FD/path argument pair, not just openat: failed readlinkat, statx and
+    // newfstatat attempts have no returned descriptor to reveal their target.
+    for (const relative of line.matchAll(
+      /(?:\(|, )(?:-?\d+|AT_FDCWD)<(\/[^>]*)>, ("(?:[^"\\]|\\.)*")/gu,
+    )) {
+      let pathname;
+      try {
+        pathname = JSON.parse(relative[2]);
+      } catch {
+        assert.fail(`Unresolved FD-relative pathname: ${line}`);
+      }
+      const path = posix.resolve(relative[1], pathname);
+      if (path === root || path.startsWith(`${root}/`)) return true;
+    }
+    return false;
   });
   for (const line of accesses) {
     const nodeStat =

@@ -126,6 +126,16 @@ it("keeps descriptor reuse and distinct PIDs separate and refuses ps writes", ()
   ).toThrow("non-inventory lookup");
 });
 
+it.each([
+  'readlinkat(5</proc>, "900/exe", 0x1, 4096) = -1 EACCES (Permission denied)',
+  'newfstatat(5</proc>, "900/mem", 0x1, 0) = -1 EACCES (Permission denied)',
+  'statx(5</proc>, "900/mem", 0, STATX_ALL, 0x1) = -1 EACCES (Permission denied)',
+  'openat(5</tmp>, "../proc/900/mem", O_RDONLY) = -1 EACCES (Permission denied)',
+])("checks failed relative pathname operations beyond openat: %s", (line) => {
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+});
+
 it("keeps exec-replaced threads foreign and follows acknowledged unfinished thread clones", () => {
   const observed = [
     {
