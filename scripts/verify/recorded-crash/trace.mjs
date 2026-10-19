@@ -3,6 +3,7 @@ import { readdir, readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { isAbsolute, join, resolve } from "node:path";
 import { runOwnedCommand } from "../../../dist/process/OwnedCommand.js";
+import { parseEvidence } from "../../../dist/domain/evidence.js";
 import {
   assertHistoricalPidReads,
   nodeInventoryThreads,
@@ -50,8 +51,9 @@ export async function verifyCoreInspectionTrace({
             fileURLToPath(new URL("./trace-client.mjs", import.meta.url)),
             entrypoint,
             core,
+            String(historicalPid),
           ];
-    await runOwnedCommand(
+    const result = await runOwnedCommand(
       {
         command: environment.REA_VERIFY_STRACE_COMMAND,
         arguments: [
@@ -73,6 +75,17 @@ export async function verifyCoreInspectionTrace({
       },
       { timeoutMs: 90_000, diagnosticBytes: 1024 * 1024 },
     );
+    if (mode === "cli") {
+      const report = parseEvidence(
+        JSON.parse(result.stdout.text),
+      ).normalized_result;
+      assert.ok(
+        report.threads.some(
+          (thread) => thread.historical_pid === historicalPid,
+        ),
+        "CLI must decode the selected historical-PID control before its trace qualifies",
+      );
+    }
     const executions = [];
     const ownershipReads = [];
     let gdbObserved = false;
