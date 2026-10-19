@@ -63,7 +63,7 @@ export async function verifyCoreInspectionTrace({
           "-s",
           "8192",
           "-e",
-          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority",
+          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority,prlimit64,sched_setaffinity,sched_getaffinity,sched_setscheduler,sched_getscheduler,sched_setparam,sched_getparam,sched_setattr,sched_getattr,sched_rr_get_interval",
           "-o",
           prefix,
           process.execPath,

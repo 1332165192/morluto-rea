@@ -57,9 +57,10 @@ const targetsHistoricalPid = (line, pid) => {
     priority[1] !== "PRIO_USER"
   )
     return true;
-  const first = /^(kill|tkill|rt_sigqueueinfo|pidfd_open)\((-?\d+),/u.exec(
-    line,
-  );
+  const first =
+    /^(kill|tkill|rt_sigqueueinfo|pidfd_open|prlimit64|sched_(?:setaffinity|getaffinity|setscheduler|getscheduler|setparam|getparam|setattr|getattr|rr_get_interval))\((-?\d+)[,)]/u.exec(
+      line,
+    );
   if (first !== null) {
     const target = Number(first[2]);
     if (target === pid) return true;
