@@ -136,6 +136,22 @@ it.each([
     expect(() => check(101, line, live)).toThrow("non-inventory lookup");
 });
 
+it.each([
+  "getpriority(PRIO_PROCESS, 900) = 20",
+  "setpriority(PRIO_PROCESS, 900, 0) = 0",
+  "getpriority(PRIO_PGRP, 900) = 20",
+  "setpriority(PRIO_PGRP, 900, 0) = 0",
+  "getpriority(0x3 /* unknown PRIO selector */, 900) = -1 EINVAL (Invalid argument)",
+])("rejects historical PID priority access: %s", (line) => {
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+});
+
+it("keeps native priority UID selectors and distinct PIDs separate", () => {
+  expect(check(101, "getpriority(PRIO_USER, 900) = 20")).toEqual([]);
+  expect(check(101, "getpriority(PRIO_PROCESS, 9000) = 20")).toEqual([]);
+});
+
 it("keeps exec-replaced threads foreign and follows acknowledged unfinished thread clones", () => {
   const observed = [
     {

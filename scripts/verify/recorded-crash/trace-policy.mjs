@@ -48,6 +48,15 @@ export function nodeInventoryThreads(traces, executable) {
 }
 
 const targetsHistoricalPid = (line, pid) => {
+  const priority = /^(?:getpriority|setpriority)\(([^,]+), (-?\d+)[,)]/u.exec(
+    line,
+  );
+  if (
+    priority !== null &&
+    Number(priority[2]) === pid &&
+    priority[1] !== "PRIO_USER"
+  )
+    return true;
   const first = /^(kill|tkill|rt_sigqueueinfo|pidfd_open)\((-?\d+),/u.exec(
     line,
   );
