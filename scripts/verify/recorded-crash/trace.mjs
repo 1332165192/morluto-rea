@@ -6,6 +6,7 @@ import { runOwnedCommand } from "../../../dist/process/OwnedCommand.js";
 import { parseEvidence } from "../../../dist/domain/evidence.js";
 import {
   assertHistoricalPidAccess,
+  historicalPidTraceContract,
   nodeInventoryThreads,
 } from "./trace-policy.mjs";
 
@@ -63,7 +64,7 @@ export async function verifyCoreInspectionTrace({
           "-s",
           "8192",
           "-e",
-          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority",
+          `trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,${historicalPidTraceContract.pid_syscalls.join(",")}`,
           "-o",
           prefix,
           process.execPath,
@@ -198,14 +199,6 @@ export async function verifyCoreInspectionTrace({
       executions,
       historical_pid: historicalPid,
       sentinel: "still-alive",
-      historical_pid_access_coverage: {
-        checked: [
-          "absolute-proc-paths",
-          "decoded-fd-paths",
-          "pid-targeted-controls",
-        ],
-        unverified: ["legacy-cwd-relative-paths"],
-      },
       ownership_process_table_reads: ownershipReads,
     });
   }

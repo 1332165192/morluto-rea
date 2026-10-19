@@ -13,6 +13,7 @@ import {
   startCoreSentinel,
 } from "./verify/recorded-crash/fixtures.mjs";
 import { verifyCoreInspectionTrace } from "./verify/recorded-crash/trace.mjs";
+import { historicalPidTraceContract } from "./verify/recorded-crash/trace-policy.mjs";
 
 const environment = Object.fromEntries(
   Object.entries(process.env).filter(([, value]) => typeof value === "string"),
@@ -322,6 +323,7 @@ const result = {
     "Linux x64; pwntools4.15.0/pyelftools0.33/Unicorn2.1.2; core-only BYO GDB/pwndbg2026.09.15",
   fixture_generation: "owned test program executed",
   inspection_trace: trace,
+  historical_pid_access_coverage: historicalPidTraceContract,
   verifier,
 };
 console.log(JSON.stringify(result, null, 2));

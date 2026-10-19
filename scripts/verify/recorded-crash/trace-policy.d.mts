@@ -2,6 +2,11 @@ export interface SyscallTrace {
   readonly pid: number;
   readonly text: string;
 }
+export const historicalPidTraceContract: {
+  readonly checked_paths: readonly string[];
+  readonly pid_syscalls: readonly string[];
+  readonly unverified: readonly string[];
+};
 export function nodeInventoryThreads(
   traces: readonly SyscallTrace[],
   executable: string,

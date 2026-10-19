@@ -174,3 +174,67 @@ it.each([
 ])("preserves unrelated C-quoted pathname components: %s", (line) => {
   expect(check(101, line)).toEqual([]);
 });
+
+it.each([
+  "prlimit64(900, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=4096}) = 0",
+  "sched_getaffinity(900, 8, [0]) = 8",
+  "sched_setaffinity(900, 8, [0]) = 0",
+  "sched_getparam(900, {sched_priority=0}) = 0",
+  "sched_setparam(900, {sched_priority=0}) = 0",
+  "sched_getscheduler(900) = 0",
+  "sched_setscheduler(900, SCHED_OTHER, {sched_priority=0}) = 0",
+  "sched_getattr(900, {}, 56, 0) = 0",
+  "sched_setattr(900, {}, 0) = 0",
+  "sched_rr_get_interval(900, {tv_sec=0, tv_nsec=0}) = 0",
+  "getpgid(900) = 900",
+  "getsid(900) = 900",
+  "get_robust_list(900, [0x1], [24]) = 0",
+  "migrate_pages(900, 64, [1], [1]) = 0",
+  "move_pages(900, 0, NULL, NULL, NULL, 0) = 0",
+  "setpgid(0, 900) = 0",
+  "kcmp(901, 900, KCMP_FILE, 0, 0) = 0",
+  "wait4(900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
+  "wait4(-900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
+  "waitid(P_PID, 900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
+  "waitid(P_PGID, 900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
+  "waitid(P_PIDFD, 7<pid:900>, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
+  "ioprio_get(IOPRIO_WHO_PROCESS, 900) = 0",
+  "ioprio_set(IOPRIO_WHO_PGRP, 900, 0) = 0",
+  "capget({version=_LINUX_CAPABILITY_VERSION_3, pid=900}, NULL) = 0",
+  "capset({version=_LINUX_CAPABILITY_VERSION_3, pid=900}, NULL) = 0",
+  "process_madvise(7<pid:900>, [], 0, MADV_NORMAL, 0) = -1 EPERM (Operation not permitted)",
+  "process_mrelease(7<pid:900>, 0) = -1 EPERM (Operation not permitted)",
+])(
+  "rejects resolved PID resource, scheduler and metadata targets: %s",
+  (line) => {
+    for (const live of [true, false])
+      expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+  },
+);
+
+it.each([
+  "prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=4096}) = 0",
+  "sched_getaffinity(0, 8, [0]) = 8",
+  "sched_setscheduler(901, 900, {sched_priority=0}) = -1 EINVAL (Invalid argument)",
+  "sched_get_priority_max(900) = -1 EINVAL (Invalid argument)",
+  "getpgid(901) = 900",
+  "wait4(-1, NULL, WNOHANG, NULL) = 0",
+  "waitid(P_ALL, 900, NULL, WNOHANG, NULL) = 0",
+  "ioprio_get(IOPRIO_WHO_USER, 900) = 0",
+  "capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, NULL) = 0",
+  "kcmp(901, 902, KCMP_FILE, 900, 0) = 0",
+])(
+  "keeps self, UID, policy and output values distinct from PID targets: %s",
+  (line) => {
+    expect(check(101, line)).toEqual([]);
+  },
+);
+
+it.each([
+  "sched_getaffinity(unknown, 8, [0]) = -1 EFAULT (Bad address)",
+  "capget(NULL, NULL) = -1 EFAULT (Bad address)",
+  "waitid(P_PIDFD, 7, NULL, WNOHANG, NULL) = -1 EBADF (Bad file descriptor)",
+  "ioprio_get(0x4 /* unknown selector */, 900) = -1 EINVAL (Invalid argument)",
+])("retains unresolved target facts: %s", (line) => {
+  expect(() => check(101, line)).toThrow("Unresolved process target");
+});

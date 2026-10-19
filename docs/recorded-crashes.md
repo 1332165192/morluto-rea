@@ -115,10 +115,12 @@ PID-directory opens and relative accesses through those handles are rejected.
 Failed FD-relative pathname attempts are checked across syscall variants.
 Legacy relative pathname calls without dirfd/cwd evidence remain unverified;
 the verification report declares this gap rather than establishing their absence.
-The trace includes signal and priority calls and rejects PID-targeted priority
-queries/changes, signals/probes and
-pidfd controls, including nonfatal signals and signal zero. These checks cover
-the recorded file/process/signal/priority syscall surfaces, not every possible kernel
-interaction. The syscall trace also rejects access to the still-present
+One syscall/selector contract supplies trace selection, target interpretation
+and the report's explicit coverage catalog. It includes PID-directed resource
+limits, scheduling, priority, process metadata, signals and pidfd controls.
+Self, group and UID selectors retain their syscall-defined meanings; unresolved
+targets cannot qualify. Coverage is reported once for all CLI/MCP traces and
+does not establish containment of every possible kernel interaction.
+The syscall trace also rejects access to the still-present
 source executable. The CI workflow defines Ubuntu 24.04 and Debian 13 (GDB 16)
 container lanes. Original inputs and host configuration remain unchanged.
