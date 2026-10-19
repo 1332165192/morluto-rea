@@ -2,16 +2,15 @@ import { z } from "zod";
 import { canBorrowParsedJsonSnapshot } from "../immutableJson.js";
 
 import { localPathStringSchema } from "../localPath.js";
-import { CANONICAL_BASE64_PATTERN } from "../stringPatterns.js";
+import { canonicalBase64Schema } from "../base64Schema.js";
 
 const unsignedHex = z.string().regex(/^0x(?:0|[1-9a-f][0-9a-f]{0,15})$/);
 const index = z.number().int().nonnegative();
 const scalar = z.union([z.string(), z.number().int()]);
 const range = z.strictObject({ offset: unsignedHex, bytes: unsignedHex });
-const canonicalBase64 = z.string().regex(CANONICAL_BASE64_PATTERN);
 const name = z.strictObject({
   display: z.string(),
-  bytes_base64: canonicalBase64.nullable(),
+  bytes_base64: canonicalBase64Schema.nullable(),
   location: range.nullable(),
   unknown_reason: z.string().nullable(),
 });
@@ -151,7 +150,7 @@ const binaryLayoutObjectSchema = z.strictObject({
     z.strictObject({
       section_index: index,
       location: range,
-      encoded_bytes_base64: canonicalBase64,
+      encoded_bytes_base64: canonicalBase64Schema,
       entries: z.array(
         z.strictObject({ decoded_index: index, reported_offset: unsignedHex }),
       ),
