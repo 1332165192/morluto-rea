@@ -21,10 +21,7 @@ export const processIdentityHasExited = (
 
 export const processIdentityIsExiting = (
   identity: ProcessIdentityObservation | undefined,
-): identity is Extract<
-  ProcessIdentityObservation,
-  { readonly state: "readable" }
-> =>
+): boolean =>
   identity?.state === "readable" &&
   identity.lifecycle?.state === "observed" &&
   identity.lifecycle.lifecycle === "exiting";

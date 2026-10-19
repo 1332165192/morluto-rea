@@ -37,10 +37,11 @@ const hostWith = (
   listProcesses: vi.fn(async () => [row]),
   environment: async () => ({}),
   processIdentities: vi.fn(
-    async (rows) => new Map(rows.map(({ pid }) => [pid, observe()])),
+    async (rows: readonly ProcessTableEntry[]) =>
+      new Map(rows.map(({ pid }) => [pid, observe()])),
   ),
   runTokens: vi.fn(
-    async (rows) =>
+    async (rows: readonly ProcessTableEntry[]) =>
       new Map(
         rows.map(({ pid }) => [
           pid,
