@@ -82,7 +82,7 @@ const readsMetadata = (line, root, names) => {
   );
 };
 
-/** Permit only observed inventory reads; PID-directory handles and controls never qualify. */
+/** Check resolved PID references; cwd-relative legacy paths remain unqualified. */
 export function assertHistoricalPidAccess({
   trace,
   historicalPid,
