@@ -83,6 +83,14 @@ export class ProcessOwnershipEvidenceOwner {
       readonly scopeFacts?: readonly ProcessOwnershipFact[];
     },
   ): readonly RetainedProcessOwnershipCandidate[] {
+    // Acquire parent/child scope while its bracketed token proof still exists.
+    // A later terminal observation may retire that parent, never its child's
+    // already observed relationship to the run.
+    if (facts.some((fact) => fact.beforeExitSettlement !== undefined))
+      this.reconcile(
+        facts.map((fact) => fact.beforeExitSettlement ?? fact),
+        options,
+      );
     this.#snapshotCount += 1;
     const factsByPid = new Map(facts.map((fact) => [fact.process.pid, fact]));
     const sameGeneration = new Map<
