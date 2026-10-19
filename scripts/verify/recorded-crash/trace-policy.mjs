@@ -1,52 +1,6 @@
 import assert from "node:assert/strict";
 import { posix } from "node:path";
 
-/** Identify REA's Node processes and their observed CLONE_THREAD children. */
-export function nodeInventoryThreads(traces, executable) {
-  const executesForeign = (text) =>
-    text
-      .split("\n")
-      .some(
-        (line) =>
-          /^execve\(/u.test(line) &&
-          line.endsWith(" = 0") &&
-          !line.startsWith(`execve(${JSON.stringify(executable)},`),
-      );
-  const byPid = new Map(traces.map((trace) => [trace.pid, trace]));
-  const nodes = new Set(
-    traces
-      .filter(
-        ({ text }) =>
-          !executesForeign(text) &&
-          text
-            .split("\n")
-            .some(
-              (line) =>
-                line.startsWith(`execve(${JSON.stringify(executable)},`) &&
-                line.endsWith(" = 0"),
-            ),
-      )
-      .map(({ pid }) => pid),
-  );
-  for (const pid of nodes) {
-    let pendingThreadClone = false;
-    for (const line of byPid.get(pid)?.text.split("\n") ?? []) {
-      if (!/^(?:clone3?\(|<\.\.\. clone3? resumed>)/u.test(line)) continue;
-      if (/^clone3?\(/u.test(line))
-        pendingThreadClone = /\bCLONE_THREAD\b/u.test(line);
-      const child = / = (\d+)$/u.exec(line);
-      if (pendingThreadClone && child !== null) {
-        const childPid = Number(child[1]);
-        const trace = byPid.get(childPid);
-        if (trace !== undefined && !executesForeign(trace.text))
-          nodes.add(childPid);
-      }
-      if (!line.endsWith("<unfinished ...>")) pendingThreadClone = false;
-    }
-  }
-  return nodes;
-}
-
 // This owner supplies both tracer selection and target interpretation. Kinds
 // describe syscall argument semantics, never catalog positions or output PIDs.
 const pidTargetKinds = new Map([
@@ -176,7 +130,7 @@ const readsMetadata = (line, root, names) => {
 export function assertHistoricalPidAccess({
   trace,
   historicalPid,
-  nodeThreads,
+  ownershipThreads,
   liveCollision,
   psInventory,
 }) {
@@ -216,8 +170,9 @@ export function assertHistoricalPidAccess({
       !referencesHistoricalPath(line)
     )
       continue;
-    const nodeStat =
-      nodeThreads.has(trace.pid) && readsMetadata(line, root, ["stat"]);
+    const ownershipMetadata =
+      ownershipThreads.has(trace.pid) &&
+      readsMetadata(line, root, ["stat", "status"]);
     const psMetadata =
       psInventory &&
       (readsMetadata(line, root, [
@@ -236,7 +191,7 @@ export function assertHistoricalPidAccess({
       liveCollision &&
         target !== "historical" &&
         target !== "unresolved" &&
-        (nodeStat || psMetadata),
+        (ownershipMetadata || psMetadata),
       `${target === "unresolved" ? "Unresolved process target in" : "Historical PID caused a"} non-inventory lookup in trace ${trace.pid}: ${line}`,
     );
     accesses.push(line);

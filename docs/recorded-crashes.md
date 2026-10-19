@@ -105,11 +105,13 @@ GDB/Python/pwndbg/strace. Fixture generation explicitly launches its owned test
 program; subsequent inspection only reads the resulting core. Real acceptance
 checks recorded threads, high registers, missing/malformed notes, opaque owners,
 CLI/MCP parity, optional debugger context and historical PID collision with an
-owned live sentinel. Observed Node processes and their traced threads may read
-that live process's `stat` for the shared ownership inventory; debugger and
-decoder processes cannot use this exception. A second recording uses a valid
+owned live sentinel. An observed Node thread group must launch the exact ownership
+`ps` inventory before it can read that live process's `stat` or `status` for native
+identity/UID facts. Only traced `CLONE_THREAD` members share this allowance;
+exec-replaced threads, ordinary children, debugger and decoder processes cannot
+use it. A second recording uses a valid
 historical PID above the host's assignable PID range and rejects resolved lookups,
-including Node `stat` reads, to detect historical-PID-driven access separately
+including Node `stat`/`status` reads, to detect historical-PID-driven access separately
 from live inventory. Descriptor paths come from strace's `-yy` decoding; exact
 PID-directory opens and relative accesses through those handles are rejected.
 Failed FD-relative pathname attempts are checked across syscall variants.

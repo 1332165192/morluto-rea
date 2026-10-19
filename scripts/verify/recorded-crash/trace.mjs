@@ -7,8 +7,8 @@ import { parseEvidence } from "../../../dist/domain/evidence.js";
 import {
   assertHistoricalPidAccess,
   historicalPidTraceContract,
-  nodeInventoryThreads,
 } from "./trace-policy.mjs";
+import { collectOwnershipTraceFacts } from "./trace-ownership.mjs";
 
 /** Check attempted syscalls, including failed attempts, on a recorded PID that collides with an owned live sentinel. */
 export async function verifyCoreInspectionTrace({
@@ -100,11 +100,19 @@ export async function verifyCoreInspectionTrace({
       // Retain only execution/thread evidence across files, not all raw traces.
       const inventory = text
         .split("\n")
-        .filter((line) => /^(?:execve|clone|<\.\.\. clone)/u.test(line))
+        .filter((line) =>
+          /^(?:execve|clone|fork|vfork|<\.\.\. (?:clone|fork|vfork))/u.test(
+            line,
+          ),
+        )
         .join("\n");
       traces.push({ pid, text: inventory, file });
     }
-    const nodeThreads = nodeInventoryThreads(traces, process.execPath);
+    const ownershipFacts = collectOwnershipTraceFacts({
+      traces,
+      nodeExecutable: process.execPath,
+      psExecutables: psPaths,
+    });
     for (const trace of traces) {
       const { file } = trace;
       const text = await readFile(join(root, file), "utf8");
@@ -115,23 +123,13 @@ export async function verifyCoreInspectionTrace({
         !text.split("\n").some((line) => line.includes(recordedExecutable)),
         `Inspection attempted access to the recorded executable: ${file}`,
       );
-      const ownershipTrace = text
-        .split("\n")
-        .some(
-          (line) =>
-            /^execve\("\/(?:usr\/)?bin\/ps",/u.test(line) &&
-            line.includes(
-              '["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="]',
-            ) &&
-            line.endsWith(" = 0"),
-        );
       ownershipReads.push(
         ...assertHistoricalPidAccess({
           trace: { pid: trace.pid, text },
           historicalPid,
-          nodeThreads,
+          ownershipThreads: ownershipFacts.ownershipThreads,
           liveCollision: historicalPid === sentinel.pid,
-          psInventory: ownershipTrace,
+          psInventory: ownershipFacts.psProcesses.has(trace.pid),
         }),
       );
       assert.ok(
@@ -148,48 +146,40 @@ export async function verifyCoreInspectionTrace({
         ),
         `Inspection attempted an Internet socket: ${file}`,
       );
-      for (const line of text.split("\n")) {
-        if (!/execve(?:at)?\(/u.test(line)) continue;
-        const match = /^execve\("([^"]+)"/u.exec(line);
-        assert.notEqual(match, null, `Unresolved executable identity: ${line}`);
-        assert.ok(
-          / = (?:0|-1 [A-Z]+)/u.test(line),
-          `Incomplete execution observation: ${line}`,
+    }
+    for (const execution of ownershipFacts.executions) {
+      const { line } = execution;
+      const executable = await realpath(execution.path).catch(
+        () => execution.path,
+      );
+      const ownership = execution.ownershipInventory;
+      const iconv =
+        iconvPaths.has(execution.path) && line.includes('["iconv", "-l"]');
+      const version =
+        gitPaths.has(execution.path) &&
+        line.includes(
+          "[" +
+            [
+              "git",
+              "--git-dir",
+              join(plugin, ".git"),
+              "rev-parse",
+              "--short",
+              "HEAD",
+            ]
+              .map((argument) => JSON.stringify(argument))
+              .join(", ") +
+            "]",
         );
-        const executable = await realpath(match[1]).catch(() => match[1]);
-        const ownership =
-          psPaths.has(match[1]) &&
-          line.includes(
-            '["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="]',
-          );
-        const iconv =
-          iconvPaths.has(match[1]) && line.includes('["iconv", "-l"]');
-        const version =
-          gitPaths.has(match[1]) &&
-          line.includes(
-            "[" +
-              [
-                "git",
-                "--git-dir",
-                join(plugin, ".git"),
-                "rev-parse",
-                "--short",
-                "HEAD",
-              ]
-                .map((argument) => JSON.stringify(argument))
-                .join(", ") +
-              "]",
-          );
-        assert.ok(
-          [process.execPath, python, gdb].includes(executable) ||
-            ownership ||
-            iconv ||
-            version,
-          `Unexpected attempted host execution: ${line}`,
-        );
-        if (executable === gdb) gdbObserved = true;
-        executions.push(executable);
-      }
+      assert.ok(
+        [process.execPath, python, gdb].includes(executable) ||
+          ownership ||
+          iconv ||
+          version,
+        `Unexpected attempted host execution: ${line}`,
+      );
+      if (executable === gdb) gdbObserved = true;
+      executions.push(executable);
     }
     assert.ok(gdbObserved, "Trace must include the actual core-only GDB stage");
     assert.ok(executions.includes(python));

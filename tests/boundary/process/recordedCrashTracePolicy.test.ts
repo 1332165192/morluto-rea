@@ -1,35 +1,18 @@
 import { expect, it } from "vitest";
-import {
-  assertHistoricalPidAccess,
-  nodeInventoryThreads,
-} from "../../../scripts/verify/recorded-crash/trace-policy.mjs";
+import { assertHistoricalPidAccess } from "../../../scripts/verify/recorded-crash/trace-policy.mjs";
 
-const node = "/fixture/node";
 const stat = 'openat(AT_FDCWD, "/proc/900/stat", O_RDONLY|O_CLOEXEC) = 22';
-const traces = [
-  {
-    pid: 100,
-    text: [
-      'execve("/fixture/node", ["node", "rea.mjs"], 0x1 /* 3 vars */) = 0',
-      "clone3({flags=CLONE_VM|CLONE_THREAD|CLONE_SIGHAND}, 88) = 101",
-      "clone(child_stack=NULL, flags=SIGCHLD) = 102",
-    ].join("\n"),
-  },
-  { pid: 101, text: stat },
-  { pid: 102, text: stat },
-];
 
 const check = (pid: number, text: string, liveCollision = true) =>
   assertHistoricalPidAccess({
     trace: { pid, text },
     historicalPid: 900,
-    nodeThreads: nodeInventoryThreads(traces, node),
+    ownershipThreads: new Set([100, 101]),
     liveCollision,
     psInventory: false,
   });
 
-it("allows a live collision's stat read only in an observed Node process or thread", () => {
-  expect([...nodeInventoryThreads(traces, node)]).toEqual([100, 101]);
+it("allows stat reads only in the supplied ownership thread set", () => {
   expect(check(100, stat)).toEqual([stat]);
   expect(check(101, stat)).toEqual([stat]);
   expect(() => check(102, stat)).toThrow("non-inventory lookup");
@@ -51,7 +34,7 @@ it("permits procps UID metadata without granting a PID directory handle", () => 
   const input = {
     trace: { pid: 102, text: metadata },
     historicalPid: 900,
-    nodeThreads: new Set<number>(),
+    ownershipThreads: new Set<number>(),
     liveCollision: true,
     psInventory: true,
   };
@@ -119,7 +102,7 @@ it("keeps descriptor reuse and distinct PIDs separate and refuses ps writes", ()
     assertHistoricalPidAccess({
       trace: { pid: 102, text: stat.replace("O_RDONLY", "O_WRONLY") },
       historicalPid: 900,
-      nodeThreads: new Set(),
+      ownershipThreads: new Set(),
       liveCollision: true,
       psInventory: true,
     }),
@@ -150,22 +133,6 @@ it.each([
 it("keeps native priority UID selectors and distinct PIDs separate", () => {
   expect(check(101, "getpriority(PRIO_USER, 900) = 20")).toEqual([]);
   expect(check(101, "getpriority(PRIO_PROCESS, 9000) = 20")).toEqual([]);
-});
-
-it("keeps exec-replaced threads foreign and follows acknowledged unfinished thread clones", () => {
-  const observed = [
-    {
-      pid: 100,
-      text: [
-        traces[0]!.text,
-        "clone3({flags=CLONE_VM|CLONE_THREAD|CLONE_SIGHAND}, 88 <unfinished ...>",
-        "<... clone3 resumed>) = 103",
-      ].join("\n"),
-    },
-    { pid: 101, text: 'execve("/fixture/gdb", ["gdb"], 0x1) = 0\n' + stat },
-    { pid: 103, text: stat },
-  ];
-  expect([...nodeInventoryThreads(observed, node)]).toEqual([100, 103]);
 });
 
 it.each([
