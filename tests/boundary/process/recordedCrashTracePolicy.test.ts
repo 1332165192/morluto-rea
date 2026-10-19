@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import {
-  assertHistoricalPidReads,
+  assertHistoricalPidAccess,
   nodeInventoryThreads,
 } from "../../../scripts/verify/recorded-crash/trace-policy.mjs";
 
@@ -20,7 +20,7 @@ const traces = [
 ];
 
 const check = (pid: number, text: string, liveCollision = true) =>
-  assertHistoricalPidReads({
+  assertHistoricalPidAccess({
     trace: { pid, text },
     historicalPid: 900,
     nodeThreads: nodeInventoryThreads(traces, node),
@@ -35,6 +35,44 @@ it("allows a live collision's stat read only in an observed Node process or thre
   expect(() => check(102, stat)).toThrow("non-inventory lookup");
 });
 
+it("permits the native descriptor metadata query used by Node's readFile", () => {
+  const metadata =
+    'statx(20</proc/900/stat>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {}) = 0';
+  expect(check(101, metadata)).toEqual([metadata]);
+  expect(() => check(101, metadata, false)).toThrow("non-inventory lookup");
+  expect(() => check(101, metadata.replace("/stat>", "/mem>"))).toThrow(
+    "non-inventory lookup",
+  );
+});
+
+it("permits procps UID metadata without granting a PID directory handle", () => {
+  const metadata =
+    'newfstatat(AT_FDCWD</tmp>, "/proc/900", {st_mode=S_IFDIR|0555}, 0) = 0';
+  const input = {
+    trace: { pid: 102, text: metadata },
+    historicalPid: 900,
+    nodeThreads: new Set<number>(),
+    liveCollision: true,
+    psInventory: true,
+  };
+  expect(assertHistoricalPidAccess(input)).toEqual([metadata]);
+  expect(() =>
+    assertHistoricalPidAccess({ ...input, liveCollision: false }),
+  ).toThrow("non-inventory lookup");
+  expect(() =>
+    assertHistoricalPidAccess({ ...input, psInventory: false }),
+  ).toThrow("non-inventory lookup");
+  expect(() =>
+    assertHistoricalPidAccess({
+      ...input,
+      trace: {
+        pid: 102,
+        text: 'openat(AT_FDCWD, "/proc/900", O_RDONLY|O_DIRECTORY) = 5</proc/900>',
+      },
+    }),
+  ).toThrow("non-inventory lookup");
+});
+
 it.each(["mem", "maps", "environ", "exe", "root"])(
   "rejects Node access to the live historical PID's %s",
   (name) => {
@@ -46,6 +84,46 @@ it.each(["mem", "maps", "environ", "exe", "root"])(
 
 it("rejects an unlisted historical PID lookup even from an observed inventory thread", () => {
   expect(() => check(101, stat, false)).toThrow("non-inventory lookup");
+});
+
+it.each([
+  'openat(AT_FDCWD, "/proc/900", O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 5</proc/900>',
+  'openat(5</proc/900>, "mem", O_RDONLY|O_CLOEXEC) = 6</proc/900/mem>',
+  'openat(5</proc/900>, "stat", O_RDONLY|O_CLOEXEC) = -1 EACCES (Permission denied)',
+  'openat(5</proc>, "900/mem", O_RDONLY) = -1 ENOENT (No such file or directory)',
+  'openat(5</proc>, "self/../900/mem", O_RDONLY) = -1 ENOENT (No such file or directory)',
+  'openat(AT_FDCWD, "/proc/./900", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)',
+  'openat(AT_FDCWD, "/proc/self/../900/mem", O_RDONLY) = -1 ENOENT (No such file or directory)',
+  "kill(900, 0) = 0",
+  "kill(-900, SIGSTOP) = 0",
+  "kill(-1, SIGSTOP) = 0",
+  "tkill(900, SIGSTOP) = 0",
+  "tgkill(900, 901, SIGSTOP) = 0",
+  "tgkill(901, 900, SIGSTOP) = 0",
+  "rt_sigqueueinfo(900, SIGUSR1, {}) = 0",
+  "rt_tgsigqueueinfo(901, 900, SIGUSR1, {}) = 0",
+  "pidfd_open(900, 0) = 7<pid:900>",
+  "pidfd_send_signal(7<pid:900>, SIGSTOP, NULL, 0) = 0",
+  "pidfd_send_signal(7, SIGSTOP, NULL, 0) = 0",
+])("rejects historical PID directory/handle/control access: %s", (line) => {
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+});
+
+it("keeps descriptor reuse and distinct PIDs separate and refuses ps writes", () => {
+  expect(check(101, 'openat(5</tmp>, "mem", O_RDONLY) = 6</tmp/mem>')).toEqual(
+    [],
+  );
+  expect(check(101, stat.replaceAll("900", "9000"))).toEqual([]);
+  expect(() =>
+    assertHistoricalPidAccess({
+      trace: { pid: 102, text: stat.replace("O_RDONLY", "O_WRONLY") },
+      historicalPid: 900,
+      nodeThreads: new Set(),
+      liveCollision: true,
+      psInventory: true,
+    }),
+  ).toThrow("non-inventory lookup");
 });
 
 it("keeps exec-replaced threads foreign and follows acknowledged unfinished thread clones", () => {

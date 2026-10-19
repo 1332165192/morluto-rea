@@ -6,7 +6,7 @@ export function nodeInventoryThreads(
   traces: readonly SyscallTrace[],
   executable: string,
 ): ReadonlySet<number>;
-export function assertHistoricalPidReads(input: {
+export function assertHistoricalPidAccess(input: {
   readonly trace: SyscallTrace;
   readonly historicalPid: number;
   readonly nodeThreads: ReadonlySet<number>;

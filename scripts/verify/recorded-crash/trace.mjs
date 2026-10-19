@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { runOwnedCommand } from "../../../dist/process/OwnedCommand.js";
 import { parseEvidence } from "../../../dist/domain/evidence.js";
 import {
-  assertHistoricalPidReads,
+  assertHistoricalPidAccess,
   nodeInventoryThreads,
 } from "./trace-policy.mjs";
 
@@ -59,10 +59,11 @@ export async function verifyCoreInspectionTrace({
         arguments: [
           "-ff",
           "-qq",
+          "-yy",
           "-s",
           "8192",
           "-e",
-          "trace=%process,%network,%file,ptrace,process_vm_readv,process_vm_writev",
+          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd",
           "-o",
           prefix,
           process.execPath,
@@ -124,7 +125,7 @@ export async function verifyCoreInspectionTrace({
             line.endsWith(" = 0"),
         );
       ownershipReads.push(
-        ...assertHistoricalPidReads({
+        ...assertHistoricalPidAccess({
           trace: { pid: trace.pid, text },
           historicalPid,
           nodeThreads,

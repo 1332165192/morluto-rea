@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { posix } from "node:path";
 
 /** Identify REA's Node processes and their observed CLONE_THREAD children. */
 export function nodeInventoryThreads(traces, executable) {
@@ -46,34 +47,92 @@ export function nodeInventoryThreads(traces, executable) {
   return nodes;
 }
 
-/** Permit only observed inventory metadata; an unlisted historical PID permits no lookup. */
-export function assertHistoricalPidReads({
+const targetsHistoricalPid = (line, pid) => {
+  const first = /^(kill|tkill|rt_sigqueueinfo|pidfd_open)\((-?\d+),/u.exec(
+    line,
+  );
+  if (first !== null) {
+    const target = Number(first[2]);
+    if (target === pid) return true;
+    if (first[1] === "kill" && (target === -pid || target === -1)) return true;
+  }
+  const pair = /^(?:tgkill|rt_tgsigqueueinfo)\((-?\d+), (-?\d+),/u.exec(line);
+  if (pair !== null && (Number(pair[1]) === pid || Number(pair[2]) === pid))
+    return true;
+  // With -yy the producer supplies the actual pidfd target. An undecoded
+  // pidfd control cannot establish that it excludes the historical process.
+  return (
+    /^(?:pidfd_send_signal|pidfd_getfd)\(/u.test(line) &&
+    (!/<pid:\d+>/u.test(line) || line.includes(`<pid:${pid}>`))
+  );
+};
+
+const readsMetadata = (line, root, names) => {
+  const path = `${root}/(?:${names.join("|")})`;
+  return (
+    new RegExp(
+      `^openat\\([^,]+, "${path}", O_RDONLY(?:\\|O_CLOEXEC)?\\)`,
+      "u",
+    ).test(line) ||
+    new RegExp(
+      `^statx\\(\\d+<${path}>, "", [^,]*\\bAT_EMPTY_PATH\\b`,
+      "u",
+    ).test(line) ||
+    new RegExp(`^fstat(?:64)?\\(\\d+<${path}>,`, "u").test(line)
+  );
+};
+
+/** Permit only observed inventory reads; PID-directory handles and controls never qualify. */
+export function assertHistoricalPidAccess({
   trace,
   historicalPid,
   nodeThreads,
   liveCollision,
   psInventory,
 }) {
-  const reads = trace.text
-    .split("\n")
-    .filter((line) => line.includes(`/proc/${historicalPid}/`));
-  for (const line of reads) {
+  const root = `/proc/${historicalPid}`;
+  const pathReference = new RegExp(`${root}(?=[/">]|$)`, "u");
+  const accesses = trace.text.split("\n").filter((line) => {
+    if (pathReference.test(line) || targetsHistoricalPid(line, historicalPid))
+      return true;
+    // strace prints the ASCII /proc, PID and dot segments literally. Keep the
+    // original line as evidence while recognizing lexical path aliases too.
+    for (const quoted of line.matchAll(/"((?:[^"\\]|\\.)*)"/gu))
+      if (
+        quoted[1].startsWith("/proc/") &&
+        pathReference.test(posix.normalize(quoted[1]))
+      )
+        return true;
+    // -yy resolves dirfds at the syscall boundary, including descriptor reuse.
+    // Cover failed relative lookups from /proc, which have no returned FD path.
+    const relative = /^openat\(\d+<\/proc>, "([^"]*)",/u.exec(line);
+    if (relative === null) return false;
+    const path = posix.resolve("/proc", relative[1]);
+    return path === root || path.startsWith(`${root}/`);
+  });
+  for (const line of accesses) {
     const nodeStat =
-      nodeThreads.has(trace.pid) &&
-      new RegExp(
-        `^openat\\([^,]+, "/proc/${historicalPid}/stat", O_RDONLY(?:\\|O_CLOEXEC)?\\)`,
-        "u",
-      ).test(line);
+      nodeThreads.has(trace.pid) && readsMetadata(line, root, ["stat"]);
     const psMetadata =
       psInventory &&
-      new RegExp(
-        `/proc/${historicalPid}/(?:stat|status|cmdline|wchan|environ)"`,
-        "u",
-      ).test(line);
+      (readsMetadata(line, root, [
+        "stat",
+        "status",
+        "cmdline",
+        "wchan",
+        "environ",
+      ]) ||
+        // procps reads the PID directory's UID without opening a directory FD.
+        new RegExp(
+          `^newfstatat\\([^,]+, "${root}", .*?, (?:0|AT_SYMLINK_NOFOLLOW)\\)`,
+          "u",
+        ).test(line));
     assert.ok(
-      liveCollision && (nodeStat || psMetadata),
+      liveCollision &&
+        !targetsHistoricalPid(line, historicalPid) &&
+        (nodeStat || psMetadata),
       `Historical PID caused a non-inventory lookup in trace ${trace.pid}: ${line}`,
     );
   }
-  return reads;
+  return accesses;
 }
