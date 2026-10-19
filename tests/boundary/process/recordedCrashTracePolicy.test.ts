@@ -176,16 +176,6 @@ it.each([
 });
 
 it.each([
-  "prlimit64(900, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=4096}) = 0",
-  "sched_getaffinity(900, 8, [0]) = 8",
-  "sched_setaffinity(900, 8, [0]) = 0",
-  "sched_getparam(900, {sched_priority=0}) = 0",
-  "sched_setparam(900, {sched_priority=0}) = 0",
-  "sched_getscheduler(900) = 0",
-  "sched_setscheduler(900, SCHED_OTHER, {sched_priority=0}) = 0",
-  "sched_getattr(900, {}, 56, 0) = 0",
-  "sched_setattr(900, {}, 0) = 0",
-  "sched_rr_get_interval(900, {tv_sec=0, tv_nsec=0}) = 0",
   "getpgid(900) = 900",
   "getsid(900) = 900",
   "get_robust_list(900, [0x1], [24]) = 0",
@@ -237,4 +227,27 @@ it.each([
   "ioprio_get(0x4 /* unknown selector */, 900) = -1 EINVAL (Invalid argument)",
 ])("retains unresolved target facts: %s", (line) => {
   expect(() => check(101, line)).toThrow("Unresolved process target");
+});
+
+it.each([
+  "prlimit64(900, RLIMIT_NOFILE, NULL, {rlim_cur=1024, rlim_max=1024}) = 0",
+  "prlimit64(900, RLIMIT_NOFILE, {rlim_cur=1024, rlim_max=1024}, NULL) = 0",
+  "sched_setaffinity(900, 128, [0 1]) = 0",
+  "sched_getaffinity(900, 128, [0 1]) = 8",
+  "sched_setscheduler(900, SCHED_OTHER, {sched_priority=0}) = 0",
+  "sched_getscheduler(900) = SCHED_OTHER",
+  "sched_setparam(900, {sched_priority=0}) = 0",
+  "sched_getparam(900, {sched_priority=0}) = 0",
+  "sched_setattr(900, {size=56, sched_policy=SCHED_OTHER}, 0) = 0",
+  "sched_getattr(900, {size=56, sched_policy=SCHED_OTHER}, 56, 0) = 0",
+  "sched_rr_get_interval(900, {tv_sec=0, tv_nsec=0}) = 0",
+])("rejects historical PID resource and scheduler access: %s", (line) => {
+  for (const live of [true, false]) {
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+    expect(() =>
+      check(101, line.replace(/ = .*/u, " = -1 ESRCH (No such process)"), live),
+    ).toThrow("non-inventory lookup");
+  }
+  expect(check(101, line.replace("(900", "(9000"))).toEqual([]);
+  expect(check(101, line.replace("(900", "(0"))).toEqual([]);
 });
