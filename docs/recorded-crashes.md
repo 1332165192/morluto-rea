@@ -116,7 +116,8 @@ Failed FD-relative pathname attempts are checked across syscall variants.
 Legacy relative pathname calls without dirfd/cwd evidence remain unverified;
 the verification report declares this gap rather than establishing their absence.
 One syscall/selector contract supplies trace selection, target interpretation
-and the report's explicit coverage catalog. It includes PID-directed resource
+and the report's explicit coverage catalog. Unlisted PID-directed syscalls remain
+unverified. The catalog includes PID-directed resource
 limits, scheduling, priority, process metadata, signals and pidfd controls.
 Self, group and UID selectors retain their syscall-defined meanings; unresolved
 targets cannot qualify. Coverage is reported once for all CLI/MCP traces and

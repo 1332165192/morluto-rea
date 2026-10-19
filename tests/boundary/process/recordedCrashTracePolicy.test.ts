@@ -188,8 +188,6 @@ it.each([
   "waitid(P_PID, 900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
   "waitid(P_PGID, 900, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
   "waitid(P_PIDFD, 7<pid:900>, NULL, WNOHANG, NULL) = -1 ECHILD (No child processes)",
-  "ioprio_get(IOPRIO_WHO_PROCESS, 900) = 0",
-  "ioprio_set(IOPRIO_WHO_PGRP, 900, 0) = 0",
   "capget({version=_LINUX_CAPABILITY_VERSION_3, pid=900}, NULL) = 0",
   "capset({version=_LINUX_CAPABILITY_VERSION_3, pid=900}, NULL) = 0",
   "process_madvise(7<pid:900>, [], 0, MADV_NORMAL, 0) = -1 EPERM (Operation not permitted)",
@@ -210,7 +208,6 @@ it.each([
   "getpgid(901) = 900",
   "wait4(-1, NULL, WNOHANG, NULL) = 0",
   "waitid(P_ALL, 900, NULL, WNOHANG, NULL) = 0",
-  "ioprio_get(IOPRIO_WHO_USER, 900) = 0",
   "capget({version=_LINUX_CAPABILITY_VERSION_3, pid=0}, NULL) = 0",
   "kcmp(901, 902, KCMP_FILE, 900, 0) = 0",
 ])(
@@ -226,7 +223,8 @@ it.each([
   "waitid(P_PIDFD, 7, NULL, WNOHANG, NULL) = -1 EBADF (Bad file descriptor)",
   "ioprio_get(0x4 /* unknown selector */, 900) = -1 EINVAL (Invalid argument)",
 ])("retains unresolved target facts: %s", (line) => {
-  expect(() => check(101, line)).toThrow("Unresolved process target");
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("Unresolved process target");
 });
 
 it.each([
@@ -250,4 +248,22 @@ it.each([
   }
   expect(check(101, line.replace("(900", "(9000"))).toEqual([]);
   expect(check(101, line.replace("(900", "(0"))).toEqual([]);
+});
+
+it.each([
+  "ioprio_get(IOPRIO_WHO_PROCESS, 900) = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0)",
+  "ioprio_set(IOPRIO_WHO_PROCESS, 900, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0)) = 0",
+  "ioprio_get(IOPRIO_WHO_PGRP, 900) = 0",
+  "ioprio_set(IOPRIO_WHO_PGRP, 900, 0) = -1 ESRCH (No such process)",
+  "ioprio_get(PRIO_USER, 900) = -1 EINVAL (Invalid argument)",
+  "getpriority(IOPRIO_WHO_USER, 900) = -1 EINVAL (Invalid argument)",
+])("rejects historical PID I/O priority access: %s", (line) => {
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+});
+
+it("keeps I/O priority UID selectors and distinct PID/self selectors separate", () => {
+  expect(check(101, "ioprio_get(IOPRIO_WHO_USER, 900) = 0")).toEqual([]);
+  expect(check(101, "ioprio_get(IOPRIO_WHO_PROCESS, 9000) = 0")).toEqual([]);
+  expect(check(101, "ioprio_get(IOPRIO_WHO_PROCESS, 0) = 0")).toEqual([]);
 });

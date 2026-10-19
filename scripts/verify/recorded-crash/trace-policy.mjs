@@ -91,7 +91,10 @@ const pidTargetKinds = new Map([
 export const historicalPidTraceContract = Object.freeze({
   checked_paths: Object.freeze(["absolute-proc-paths", "decoded-fd-paths"]),
   pid_syscalls: Object.freeze([...pidTargetKinds.keys()]),
-  unverified: Object.freeze(["legacy-cwd-relative-paths"]),
+  unverified: Object.freeze([
+    "legacy-cwd-relative-paths",
+    "other-pid-directed-syscalls",
+  ]),
 });
 
 const readPid = (value) => {
