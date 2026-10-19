@@ -105,6 +105,11 @@ GDB/Python/pwndbg/strace. Fixture generation explicitly launches its owned test
 program; subsequent inspection only reads the resulting core. Real acceptance
 checks recorded threads, high registers, missing/malformed notes, opaque owners,
 CLI/MCP parity, optional debugger context and historical PID collision with an
-owned live sentinel. The syscall trace also rejects access to the still-present
+owned live sentinel. Observed Node processes and their traced threads may read
+that live process's `stat` for the shared ownership inventory; debugger and
+decoder processes cannot use this exception. A second recording uses a valid
+historical PID above the host's assignable PID range and rejects every lookup,
+including Node `stat` reads, to detect historical-PID-driven access separately
+from live inventory. The syscall trace also rejects access to the still-present
 source executable. The CI workflow defines Ubuntu 24.04 and Debian 13 (GDB 16)
 container lanes. Original inputs and host configuration remain unchanged.

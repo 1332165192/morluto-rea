@@ -61,6 +61,10 @@ try {
   const core = await createRecordedCore(options);
   sentinel = await startCoreSentinel(options);
   sentinel.assertAlive();
+  // Valid signed ELF PID, outside this Linux host's assignable PID range.
+  const unlistedPid = 2 ** 31 - 1;
+  const pidMaximum = Number(await readFile("/proc/sys/kernel/pid_max", "utf8"));
+  assert.ok(Number.isSafeInteger(pidMaximum) && pidMaximum < unlistedPid);
   const fixtures = JSON.parse(
     await fixtureCommand(
       environment.REA_PWNTOOLS_PYTHON,
@@ -72,6 +76,7 @@ try {
         core,
         root.path,
         String(sentinel.pid),
+        String(unlistedPid),
       ],
       options,
     ),
@@ -276,6 +281,15 @@ try {
     core: fixtures["historical-pid-collision"],
     sentinel,
   });
+  trace.push(
+    ...(await verifyCoreInspectionTrace({
+      ...options,
+      entrypoint,
+      core: fixtures["historical-pid-unlisted"],
+      historicalPid: unlistedPid,
+      sentinel,
+    })),
+  );
   cases += trace.length;
   assert.ok((await readFile(core)).length > 0);
 } catch (cause) {
