@@ -109,12 +109,10 @@ export function assertHistoricalPidAccess({
     for (const relative of line.matchAll(
       /(?:\(|, )(?:-?\d+|AT_FDCWD)<(\/[^>]*)>, ("(?:[^"\\]|\\.)*")/gu,
     )) {
-      let pathname;
-      try {
-        pathname = JSON.parse(relative[2]);
-      } catch {
-        assert.fail(`Unresolved FD-relative pathname: ${line}`);
-      }
+      // strace prints ASCII separators, dot segments, /proc and decimal PIDs
+      // literally. Other C-escaped bytes remain opaque path components; JSON
+      // decoding would incorrectly reject valid non-ASCII caller paths.
+      const pathname = relative[2].slice(1, -1);
       const path = posix.resolve(relative[1], pathname);
       if (path === root || path.startsWith(`${root}/`)) return true;
     }

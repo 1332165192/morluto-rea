@@ -151,3 +151,10 @@ it("keeps exec-replaced threads foreign and follows acknowledged unfinished thre
   ];
   expect([...nodeInventoryThreads(observed, node)]).toEqual([100, 103]);
 });
+
+it.each([
+  String.raw`openat(AT_FDCWD</fixture>, "/fixture/\345\267\245\345\205\267", O_RDONLY) = -1 ENOENT (No such file or directory)`,
+  String.raw`openat(5</fixture>, "\345\267\245\345\205\267", O_RDONLY) = -1 ENOENT (No such file or directory)`,
+])("preserves unrelated C-quoted pathname components: %s", (line) => {
+  expect(check(101, line)).toEqual([]);
+});
