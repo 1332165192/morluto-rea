@@ -63,7 +63,7 @@ export async function verifyCoreInspectionTrace({
           "-s",
           "8192",
           "-e",
-          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority,prlimit64,sched_setaffinity,sched_getaffinity,sched_setscheduler,sched_getscheduler,sched_setparam,sched_getparam,sched_setattr,sched_getattr,sched_rr_get_interval",
+          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority,ioprio_get,ioprio_set,prlimit64,sched_setaffinity,sched_getaffinity,sched_setscheduler,sched_getscheduler,sched_setparam,sched_getparam,sched_setattr,sched_getattr,sched_rr_get_interval",
           "-o",
           prefix,
           process.execPath,
@@ -202,9 +202,15 @@ export async function verifyCoreInspectionTrace({
         checked: [
           "absolute-proc-paths",
           "decoded-fd-paths",
-          "pid-targeted-controls",
+          "signals-and-pidfds",
+          "cpu-and-io-priority",
+          "resource-limits",
+          "scheduler-operations",
         ],
-        unverified: ["legacy-cwd-relative-paths"],
+        unverified: [
+          "legacy-cwd-relative-paths",
+          "other-pid-directed-syscalls",
+        ],
       },
       ownership_process_table_reads: ownershipReads,
     });

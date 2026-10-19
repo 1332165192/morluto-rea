@@ -115,12 +115,12 @@ PID-directory opens and relative accesses through those handles are rejected.
 Failed FD-relative pathname attempts are checked across syscall variants.
 Legacy relative pathname calls without dirfd/cwd evidence remain unverified;
 the verification report declares this gap rather than establishing their absence.
-The trace explicitly includes priority, resource-limit (`prlimit64`), scheduler
+The trace explicitly includes CPU/I/O priority, resource-limit (`prlimit64`), scheduler
 and signal calls. It rejects historical-PID priority queries/changes, resource-limit
 queries/changes, scheduler affinity/policy/parameter/attribute/interval operations,
 signals/probes and pidfd controls, including nonfatal signals and signal zero.
-These checks cover the selected file/process/signal/priority/resource/scheduler
-syscall surfaces, not every possible kernel
-interaction. The syscall trace also rejects access to the still-present
+The report names these checked syscall families and marks other PID-directed
+syscalls as unverified. These checks cover the selected surfaces, not every
+possible kernel interaction. The syscall trace also rejects access to the still-present
 source executable. The CI workflow defines Ubuntu 24.04 and Debian 13 (GDB 16)
 container lanes. Original inputs and host configuration remain unchanged.

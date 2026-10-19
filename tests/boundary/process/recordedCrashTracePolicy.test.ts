@@ -197,3 +197,22 @@ it.each([
   expect(check(101, line.replace("(900", "(9000"))).toEqual([]);
   expect(check(101, line.replace("(900", "(0"))).toEqual([]);
 });
+
+it.each([
+  "ioprio_get(IOPRIO_WHO_PROCESS, 900) = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0)",
+  "ioprio_set(IOPRIO_WHO_PROCESS, 900, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0)) = 0",
+  "ioprio_get(IOPRIO_WHO_PGRP, 900) = 0",
+  "ioprio_set(IOPRIO_WHO_PGRP, 900, 0) = -1 ESRCH (No such process)",
+  "ioprio_get(0x4 /* unknown selector */, 900) = -1 EINVAL (Invalid argument)",
+  "ioprio_get(PRIO_USER, 900) = -1 EINVAL (Invalid argument)",
+  "getpriority(IOPRIO_WHO_USER, 900) = -1 EINVAL (Invalid argument)",
+])("rejects historical PID I/O priority access: %s", (line) => {
+  for (const live of [true, false])
+    expect(() => check(101, line, live)).toThrow("non-inventory lookup");
+});
+
+it("keeps I/O priority UID selectors and distinct PID/self selectors separate", () => {
+  expect(check(101, "ioprio_get(IOPRIO_WHO_USER, 900) = 0")).toEqual([]);
+  expect(check(101, "ioprio_get(IOPRIO_WHO_PROCESS, 9000) = 0")).toEqual([]);
+  expect(check(101, "ioprio_get(IOPRIO_WHO_PROCESS, 0) = 0")).toEqual([]);
+});

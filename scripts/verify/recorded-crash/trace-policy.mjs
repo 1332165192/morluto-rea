@@ -48,15 +48,16 @@ export function nodeInventoryThreads(traces, executable) {
 }
 
 const targetsHistoricalPid = (line, pid) => {
-  const priority = /^(?:getpriority|setpriority)\(([^,]+), (-?\d+)[,)]/u.exec(
-    line,
-  );
-  if (
-    priority !== null &&
-    Number(priority[2]) === pid &&
-    priority[1] !== "PRIO_USER"
-  )
-    return true;
+  const priority =
+    /^((?:get|set)priority|ioprio_(?:get|set))\(([^,]+), (-?\d+)[,)]/u.exec(
+      line,
+    );
+  if (priority !== null && Number(priority[3]) === pid) {
+    const uidSelector = priority[1].startsWith("ioprio_")
+      ? "IOPRIO_WHO_USER"
+      : "PRIO_USER";
+    if (priority[2] !== uidSelector) return true;
+  }
   const first =
     /^(kill|tkill|rt_sigqueueinfo|pidfd_open|prlimit64|sched_(?:setaffinity|getaffinity|setscheduler|getscheduler|setparam|getparam|setattr|getattr|rr_get_interval))\((-?\d+)[,)]/u.exec(
       line,
