@@ -108,14 +108,17 @@ CLI/MCP parity, optional debugger context and historical PID collision with an
 owned live sentinel. Observed Node processes and their traced threads may read
 that live process's `stat` for the shared ownership inventory; debugger and
 decoder processes cannot use this exception. A second recording uses a valid
-historical PID above the host's assignable PID range and rejects every lookup,
+historical PID above the host's assignable PID range and rejects resolved lookups,
 including Node `stat` reads, to detect historical-PID-driven access separately
 from live inventory. Descriptor paths come from strace's `-yy` decoding; exact
 PID-directory opens and relative accesses through those handles are rejected.
+Failed FD-relative pathname attempts are checked across syscall variants.
+Legacy relative pathname calls without dirfd/cwd evidence remain unverified;
+the verification report declares this gap rather than establishing their absence.
 The trace includes signal and priority calls and rejects PID-targeted priority
 queries/changes, signals/probes and
 pidfd controls, including nonfatal signals and signal zero. These checks cover
-the recorded file/process/signal syscall surfaces, not every possible kernel
+the recorded file/process/signal/priority syscall surfaces, not every possible kernel
 interaction. The syscall trace also rejects access to the still-present
 source executable. The CI workflow defines Ubuntu 24.04 and Debian 13 (GDB 16)
 container lanes. Original inputs and host configuration remain unchanged.

@@ -198,6 +198,14 @@ export async function verifyCoreInspectionTrace({
       executions,
       historical_pid: historicalPid,
       sentinel: "still-alive",
+      historical_pid_access_coverage: {
+        checked: [
+          "absolute-proc-paths",
+          "decoded-fd-paths",
+          "pid-targeted-controls",
+        ],
+        unverified: ["legacy-cwd-relative-paths"],
+      },
       ownership_process_table_reads: ownershipReads,
     });
   }
