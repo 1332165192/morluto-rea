@@ -105,16 +105,18 @@ GDB/Python/pwndbg/strace. Fixture generation explicitly launches its owned test
 program; subsequent inspection only reads the resulting core. Real acceptance
 checks recorded threads, high registers, missing/malformed notes, opaque owners,
 CLI/MCP parity, optional debugger context and historical PID collision with an
-owned live sentinel. Observed Node processes and their traced threads may read
-that live process's `stat` for the shared ownership inventory; debugger and
-decoder processes cannot use this exception. A second recording uses a valid
+owned live sentinel. Observed Node callers of the exact process-table command
+and their traced threads may read that live process's `stat` and `status` for
+the shared ownership inventory; debugger and decoder processes cannot use this
+exception. A same-thread-group read's purpose cannot be established by strace. A second recording uses a valid
 historical PID above the host's assignable PID range and rejects resolved lookups,
 including Node `stat` reads, to detect historical-PID-driven access separately
 from live inventory. Descriptor paths come from strace's `-yy` decoding; exact
 PID-directory opens and relative accesses through those handles are rejected.
 Failed FD-relative pathname attempts are checked across syscall variants.
-Legacy relative pathname calls without dirfd/cwd evidence remain unverified;
-the verification report declares this gap rather than establishing their absence.
+Legacy relative pathname calls without dirfd/cwd evidence and symlink aliases
+remain unverified; the verification report declares these gaps rather than
+establishing their absence.
 One syscall/selector contract supplies trace selection, target interpretation
 and the report's explicit coverage catalog. Unlisted PID-directed syscalls remain
 unverified. The catalog includes PID-directed resource

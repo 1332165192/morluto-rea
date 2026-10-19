@@ -7,7 +7,7 @@ import { parseEvidence } from "../../../dist/domain/evidence.js";
 import {
   assertHistoricalPidAccess,
   historicalPidTraceContract,
-  nodeInventoryThreads,
+  ownershipInventory,
 } from "./trace-policy.mjs";
 
 /** Check attempted syscalls, including failed attempts, on a recorded PID that collides with an owned live sentinel. */
@@ -104,7 +104,11 @@ export async function verifyCoreInspectionTrace({
         .join("\n");
       traces.push({ pid, text: inventory, file });
     }
-    const nodeThreads = nodeInventoryThreads(traces, process.execPath);
+    const { nodeThreads, psPids } = ownershipInventory(
+      traces,
+      process.execPath,
+      psPaths,
+    );
     for (const trace of traces) {
       const { file } = trace;
       const text = await readFile(join(root, file), "utf8");
@@ -115,23 +119,13 @@ export async function verifyCoreInspectionTrace({
         !text.split("\n").some((line) => line.includes(recordedExecutable)),
         `Inspection attempted access to the recorded executable: ${file}`,
       );
-      const ownershipTrace = text
-        .split("\n")
-        .some(
-          (line) =>
-            /^execve\("\/(?:usr\/)?bin\/ps",/u.test(line) &&
-            line.includes(
-              '["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="]',
-            ) &&
-            line.endsWith(" = 0"),
-        );
       ownershipReads.push(
         ...assertHistoricalPidAccess({
           trace: { pid: trace.pid, text },
           historicalPid,
           nodeThreads,
           liveCollision: historicalPid === sentinel.pid,
-          psInventory: ownershipTrace,
+          psInventory: psPids.has(trace.pid),
         }),
       );
       assert.ok(

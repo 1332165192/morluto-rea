@@ -7,10 +7,14 @@ export const historicalPidTraceContract: {
   readonly pid_syscalls: readonly string[];
   readonly unverified: readonly string[];
 };
-export function nodeInventoryThreads(
+export function ownershipInventory(
   traces: readonly SyscallTrace[],
   executable: string,
-): ReadonlySet<number>;
+  psExecutables: ReadonlySet<string>,
+): {
+  readonly nodeThreads: ReadonlySet<number>;
+  readonly psPids: ReadonlySet<number>;
+};
 export function assertHistoricalPidAccess(input: {
   readonly trace: SyscallTrace;
   readonly historicalPid: number;

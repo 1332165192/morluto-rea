@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { digestSchema } from "../digests.js";
 import { localPathStringSchema } from "../localPath.js";
-import { canonicalBase64Schema } from "../base64Schema.js";
+import { canonicalBase64Schema } from "../stringPatterns.js";
 
 const sourceRangeSchema = z.strictObject({
   offset: z.number().int().nonnegative(),

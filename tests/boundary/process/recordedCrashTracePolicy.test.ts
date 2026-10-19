@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import {
   assertHistoricalPidAccess,
-  nodeInventoryThreads,
+  ownershipInventory,
 } from "../../../scripts/verify/recorded-crash/trace-policy.mjs";
 
 const node = "/fixture/node";
@@ -13,25 +13,34 @@ const traces = [
       'execve("/fixture/node", ["node", "rea.mjs"], 0x1 /* 3 vars */) = 0',
       "clone3({flags=CLONE_VM|CLONE_THREAD|CLONE_SIGHAND}, 88) = 101",
       "clone(child_stack=NULL, flags=SIGCHLD) = 102",
+      "vfork() = 104",
     ].join("\n"),
   },
   { pid: 101, text: stat },
   { pid: 102, text: stat },
+  {
+    pid: 104,
+    text: 'execve("/usr/bin/ps", ["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="], 0x1) = 0',
+  },
 ];
 
 const check = (pid: number, text: string, liveCollision = true) =>
   assertHistoricalPidAccess({
     trace: { pid, text },
     historicalPid: 900,
-    nodeThreads: nodeInventoryThreads(traces, node),
+    nodeThreads: ownershipInventory(traces, node, new Set(["/usr/bin/ps"]))
+      .nodeThreads,
     liveCollision,
     psInventory: false,
   });
 
-it("allows a live collision's stat read only in an observed Node process or thread", () => {
-  expect([...nodeInventoryThreads(traces, node)]).toEqual([100, 101]);
+it("allows a live collision's stat/status reads only in an observed Node process or thread", () => {
+  expect([
+    ...ownershipInventory(traces, node, new Set(["/usr/bin/ps"])).nodeThreads,
+  ]).toEqual([100, 101]);
   expect(check(100, stat)).toEqual([stat]);
   expect(check(101, stat)).toEqual([stat]);
+  expect(check(101, stat.replace("/stat", "/status"))).toHaveLength(1);
   expect(() => check(102, stat)).toThrow("non-inventory lookup");
 });
 
@@ -164,8 +173,11 @@ it("keeps exec-replaced threads foreign and follows acknowledged unfinished thre
     },
     { pid: 101, text: 'execve("/fixture/gdb", ["gdb"], 0x1) = 0\n' + stat },
     { pid: 103, text: stat },
+    traces[3]!,
   ];
-  expect([...nodeInventoryThreads(observed, node)]).toEqual([100, 103]);
+  expect([
+    ...ownershipInventory(observed, node, new Set(["/usr/bin/ps"])).nodeThreads,
+  ]).toEqual([100, 103]);
 });
 
 it.each([

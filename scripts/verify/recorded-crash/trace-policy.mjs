@@ -1,50 +1,114 @@
 import assert from "node:assert/strict";
 import { posix } from "node:path";
 
-/** Identify REA's Node processes and their observed CLONE_THREAD children. */
-export function nodeInventoryThreads(traces, executable) {
-  const executesForeign = (text) =>
-    text
-      .split("\n")
-      .some(
-        (line) =>
-          /^execve\(/u.test(line) &&
-          line.endsWith(" = 0") &&
-          !line.startsWith(`execve(${JSON.stringify(executable)},`),
+const ownershipPsArguments =
+  '["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="]';
+
+/** Attribute inventory to exact ps execs and observed Node caller thread groups.
+ * Follow CLONE_THREAD edges, never ordinary child-process edges. Same-process
+ * stat/status purpose cannot be distinguished by strace and remains a limit.
+ */
+export function ownershipInventory(traces, executable, psExecutables) {
+  const processGroups = new Map();
+  const findGroup = (pid) => {
+    const parent = processGroups.get(pid);
+    if (parent === undefined) {
+      processGroups.set(pid, pid);
+      return pid;
+    }
+    if (parent === pid) return pid;
+    const root = findGroup(parent);
+    processGroups.set(pid, root);
+    return root;
+  };
+  const joinThreadGroup = (left, right) => {
+    const leftRoot = findGroup(left);
+    const rightRoot = findGroup(right);
+    if (leftRoot !== rightRoot) processGroups.set(rightRoot, leftRoot);
+  };
+
+  const cloneEvents = [];
+  for (const trace of traces) {
+    let unfinished;
+    for (const rawLine of trace.text.split("\n")) {
+      const line = rawLine.trimStart();
+      const start = /^(clone3?|fork|vfork)\((.*)<unfinished \.\.\.>$/u.exec(
+        line,
       );
-  const byPid = new Map(traces.map((trace) => [trace.pid, trace]));
-  const nodes = new Set(
+      if (start !== null) {
+        unfinished = { name: start[1], text: start[2] };
+        continue;
+      }
+      const resumed = /^<\.\.\. (clone3?|fork|vfork) resumed>(.*)$/u.exec(line);
+      if (resumed !== null && resumed[1] === unfinished?.name) {
+        cloneEvents.push({
+          parentPid: trace.pid,
+          text: `${unfinished.text}${resumed[2]}`,
+        });
+        unfinished = undefined;
+        continue;
+      }
+      const complete =
+        /^(clone3?|fork|vfork)\((.*\)) = (\d+)(?:<[^>]*>)?$/u.exec(line);
+      if (complete !== null)
+        cloneEvents.push({
+          parentPid: trace.pid,
+          childPid: Number(complete[3]),
+          text: complete[2],
+        });
+    }
+  }
+
+  for (const event of cloneEvents) {
+    const childPid =
+      event.childPid ?? /\) = (\d+)(?:<[^>]*>)?$/u.exec(event.text)?.[1];
+    if (childPid === undefined) continue;
+    event.childPid = Number(childPid);
+    if (/\bCLONE_THREAD\b/u.test(event.text))
+      joinThreadGroup(event.parentPid, event.childPid);
+  }
+
+  const psPids = new Set();
+  for (const trace of traces) {
+    const successfulPsExec = trace.text.split("\n").some((line) => {
+      const executable = /^execve\("([^"]+)"/u.exec(line)?.[1];
+      return (
+        executable !== undefined &&
+        psExecutables.has(executable) &&
+        line.includes(ownershipPsArguments) &&
+        line.endsWith(" = 0")
+      );
+    });
+    if (successfulPsExec) psPids.add(trace.pid);
+  }
+
+  const psParentGroups = new Set(
+    cloneEvents
+      .filter(({ childPid }) => childPid !== undefined && psPids.has(childPid))
+      .map(({ parentPid }) => findGroup(parentPid)),
+  );
+  const executes = (trace) =>
+    trace.text
+      .split("\n")
+      .filter((line) => /^execve\(/u.test(line) && line.endsWith(" = 0"));
+  const isNodeExec = (line) =>
+    line.startsWith(`execve(${JSON.stringify(executable)},`);
+  const nodeGroups = new Set(
+    traces
+      .filter((trace) => executes(trace).some(isNodeExec))
+      .map(({ pid }) => findGroup(pid)),
+  );
+  const nodeThreads = new Set(
     traces
       .filter(
-        ({ text }) =>
-          !executesForeign(text) &&
-          text
-            .split("\n")
-            .some(
-              (line) =>
-                line.startsWith(`execve(${JSON.stringify(executable)},`) &&
-                line.endsWith(" = 0"),
-            ),
+        (trace) =>
+          nodeGroups.has(findGroup(trace.pid)) &&
+          psParentGroups.has(findGroup(trace.pid)) &&
+          !executes(trace).some((line) => !isNodeExec(line)),
       )
       .map(({ pid }) => pid),
   );
-  for (const pid of nodes) {
-    let pendingThreadClone = false;
-    for (const line of byPid.get(pid)?.text.split("\n") ?? []) {
-      if (!/^(?:clone3?\(|<\.\.\. clone3? resumed>)/u.test(line)) continue;
-      if (/^clone3?\(/u.test(line))
-        pendingThreadClone = /\bCLONE_THREAD\b/u.test(line);
-      const child = / = (\d+)$/u.exec(line);
-      if (pendingThreadClone && child !== null) {
-        const childPid = Number(child[1]);
-        const trace = byPid.get(childPid);
-        if (trace !== undefined && !executesForeign(trace.text))
-          nodes.add(childPid);
-      }
-      if (!line.endsWith("<unfinished ...>")) pendingThreadClone = false;
-    }
-  }
-  return nodes;
+  return { nodeThreads, psPids };
 }
 
 // This owner supplies both tracer selection and target interpretation. Kinds
@@ -93,6 +157,8 @@ export const historicalPidTraceContract = Object.freeze({
   pid_syscalls: Object.freeze([...pidTargetKinds.keys()]),
   unverified: Object.freeze([
     "legacy-cwd-relative-paths",
+    "symlink-path-aliases",
+    "same-node-thread-stat-status-purpose",
     "other-pid-directed-syscalls",
   ]),
 });
@@ -217,7 +283,8 @@ export function assertHistoricalPidAccess({
     )
       continue;
     const nodeStat =
-      nodeThreads.has(trace.pid) && readsMetadata(line, root, ["stat"]);
+      nodeThreads.has(trace.pid) &&
+      readsMetadata(line, root, ["stat", "status"]);
     const psMetadata =
       psInventory &&
       (readsMetadata(line, root, [

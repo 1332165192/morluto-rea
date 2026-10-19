@@ -2,12 +2,13 @@ import { z } from "zod";
 
 import type { BinaryArchitecture } from "../binaryTargetTypes.js";
 import { localPathStringSchema } from "../localPath.js";
-import { canonicalBase64Schema } from "../base64Schema.js";
+import { canonicalBase64Schema } from "../stringPatterns.js";
 import { recordedNoteCoverageIssues } from "./recordedCrashNoteCoverage.js";
 
 const hex = z.string().regex(/^0x(?:0|[1-9a-f][0-9a-f]{0,15})$/);
 const index = z.number().int().nonnegative();
 const signed32 = z.number().int().min(-2147483648).max(2147483647);
+const base64 = canonicalBase64Schema;
 const range = z.strictObject({ offset: hex, bytes: hex });
 const diagnostics = z.strictObject({
   stdout: z.string(),
@@ -221,17 +222,17 @@ const recordedCrashObjectSchema = z.strictObject({
       type: z.union([z.string(), index]),
       location: range,
       owner_location: range,
-      owner_bytes_base64: canonicalBase64Schema,
+      owner_bytes_base64: base64,
       owner_display: z.string().nullable(),
       descriptor_location: range,
-      descriptor_bytes_base64: canonicalBase64Schema,
+      descriptor_bytes_base64: base64,
     }),
   ),
   note_padding: z.array(
     z.strictObject({
       segment_index: index,
       location: range,
-      bytes_base64: canonicalBase64Schema,
+      bytes_base64: base64,
     }),
   ),
   threads: z.array(

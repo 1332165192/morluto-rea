@@ -180,6 +180,8 @@ export interface ProcessOwnershipHost {
   processIdentities?(
     processes: readonly ProcessTableEntry[],
     signal?: AbortSignal,
+    /** Linux UID enrichment is selective; omitted means UID remains unknown. */
+    effectiveUidPids?: ReadonlySet<number>,
   ): Promise<ReadonlyMap<number, ProcessIdentityObservation>>;
   /** Snapshot identities before launch, honoring startup cancellation. */
   captureBaseline?(signal?: AbortSignal): Promise<ProcessOwnershipBaseline>;
@@ -963,6 +965,14 @@ const sanitizedTokenReadFailure = (diagnostic: string | undefined): string => {
   return "other_unavailable";
 };
 
+const processIdentityHasExited = (
+  identity: ProcessIdentityObservation,
+): boolean =>
+  identity.state === "absent" ||
+  (identity.state === "readable" &&
+    identity.lifecycle?.state === "observed" &&
+    identity.lifecycle.lifecycle === "zombie");
+
 const processOwnershipFailures = async (
   members: readonly ProcessTableEntry[],
   runId: string,
@@ -973,13 +983,7 @@ const processOwnershipFailures = async (
     const facts = await readProcessOwnershipFacts(members, host);
     const failures: ProcessOwnershipValidationFailure[] = [];
     for (const fact of facts) {
-      if (fact.identityAfter.state === "absent") continue;
-      if (
-        fact.identityAfter.state === "readable" &&
-        fact.identityAfter.lifecycle?.state === "observed" &&
-        fact.identityAfter.lifecycle.lifecycle === "zombie"
-      )
-        continue;
+      if (processIdentityHasExited(fact.identityAfter)) continue;
       const relation =
         fact.identityAfter.state === "readable" &&
         fact.identityAfter.relation?.state === "observed"
@@ -1310,19 +1314,16 @@ const scanWithOwnershipEvidence = async (
     },
   );
   let facts = initialFacts;
-  for (
-    let attempt = 0;
-    attempt < TOKEN_READ_RETRY_ATTEMPTS &&
-    facts.some(({ token }) => token.state === "unavailable");
-    attempt += 1
-  ) {
+  for (let attempt = 0; attempt < TOKEN_READ_RETRY_ATTEMPTS; attempt += 1) {
+    const retryRows = facts
+      .filter(
+        ({ token, identityAfter }) =>
+          token.state === "unavailable" &&
+          !processIdentityHasExited(identityAfter),
+      )
+      .map(({ process }) => process);
+    if (retryRows.length === 0) break;
     await delay(TOKEN_READ_RETRY_DELAY_MS);
-    const pendingPids = new Set(
-      facts
-        .filter(({ token }) => token.state === "unavailable")
-        .map(({ process }) => process.pid),
-    );
-    const retryRows = candidates.filter(({ pid }) => pendingPids.has(pid));
     const retries = await readProcessOwnershipFacts(retryRows, host);
     const retryByPid = new Map(retries.map((fact) => [fact.process.pid, fact]));
     facts = facts.map((fact) => retryByPid.get(fact.process.pid) ?? fact);
@@ -1350,16 +1351,18 @@ const scanWithOwnershipEvidence = async (
   const identities = new Map<number, string | null>();
 
   for (const fact of facts) {
+    // The table row and baseline predate the final native observation. An
+    // exited candidate needs no ownership proof or signal, even when its
+    // token became unreadable while exiting. Unknown native state stays a
+    // cleanup failure; table omission alone is never proof of exit.
+    if (processIdentityHasExited(fact.identityAfter)) continue;
     if (fact.state === "replaced")
       failures.push({
         pid: fact.process.pid,
         reason: "process-identity-unavailable",
         diagnostic: "process identity changed during token validation",
       });
-    else if (
-      fact.state === "unavailable" &&
-      fact.identityAfter.state !== "absent"
-    )
+    else if (fact.state === "unavailable")
       failures.push({
         pid: fact.process.pid,
         reason: "process-identity-unavailable",
@@ -1378,7 +1381,6 @@ const scanWithOwnershipEvidence = async (
         reason: "run-token-mismatch",
       });
     if (fact.token.state !== "unavailable") continue;
-    if (fact.identityAfter.state === "absent") continue;
     const relationBefore =
       fact.identityBefore.state === "readable"
         ? fact.identityBefore.relation

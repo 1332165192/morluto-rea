@@ -1,29 +1,44 @@
+import { z } from "zod";
+
 /** Portable ASCII identifier starting with a letter. */
 export const IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9._\x2d]*$/u;
 
 /** Stable evidence identifier, also admitting namespace and path separators. */
 export const STABLE_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9._:\x2f\x2d]*$/u;
 
-// Repeated alphabet quartets exhaust V8's regexp stack on large bodies,
-// especially under JSON Schema's Unicode-set mode. Check invalid content
-// separately from an unconstrained fixed-width loop for length.
-export const BASE64_QUARTETS_PATTERN = /^(?:....)*$/;
-const PADDED_BASE64_INVALID_PATTERN = /[^A-Za-z0-9+\x2f=]|=[^=]|===/;
-export const CANONICAL_BASE64_INVALID_PATTERN = new RegExp(
-  `${PADDED_BASE64_INVALID_PATTERN.source}|[^AQgw]==$|[^AEIMQUYcgkosw048=]=$`,
-);
+// These rules are separate JSON Schema constraints. A single RE2-compatible
+// regex for alphabet and quartet validity requires a repeated alphabet group;
+// V8's Unicode-set engine overflows its regexp stack on that group near the
+// provider's 32 MiB encoded-input budget. Wildcard quartets and literal bad
+// token probes stay stack-safe at that size and compose exactly with `allOf`.
+export const BASE64_QUARTET_LENGTH_PATTERN = /^(?:....)*$/;
+export const INVALID_BASE64_CHARACTER_PATTERN = /[^A-Za-z0-9+\x2f=]/;
+export const INVALID_BASE64_PADDING_PATTERN = /(?:=[^=]|===)/;
+export const INVALID_CANONICAL_BASE64_PAD_BITS_PATTERN =
+  /(?:[^AQgw]==$|[BCDFGHJKLNOPRSTVWXZabdefhijlmnpqrtuvxyz1235679+\x2f]=$)/;
 
-const excludingInvalidBase64 = (invalid: RegExp): RegExp =>
-  new RegExp(
-    `^(?!.*(?:${invalid.source}))${BASE64_QUARTETS_PATTERN.source.slice(1)}`,
-  );
+export const isPaddedBase64 = (value: string): boolean =>
+  value.length % 4 === 0 &&
+  !INVALID_BASE64_CHARACTER_PATTERN.test(value) &&
+  !INVALID_BASE64_PADDING_PATTERN.test(value);
 
-/** Padded base64 syntax, allowing nonzero pad bits and the empty encoding. */
-export const PADDED_BASE64_PATTERN = excludingInvalidBase64(
-  PADDED_BASE64_INVALID_PATTERN,
-);
+export const isCanonicalBase64 = (value: string): boolean =>
+  isPaddedBase64(value) &&
+  !INVALID_CANONICAL_BASE64_PAD_BITS_PATTERN.test(value);
 
-/** Canonical padded base64, including zero pad bits and the empty encoding. */
-export const CANONICAL_BASE64_PATTERN = excludingInvalidBase64(
-  CANONICAL_BASE64_INVALID_PATTERN,
-);
+const paddedBase64SchemaRules = [
+  { pattern: BASE64_QUARTET_LENGTH_PATTERN.source },
+  { not: { pattern: INVALID_BASE64_CHARACTER_PATTERN.source } },
+  { not: { pattern: INVALID_BASE64_PADDING_PATTERN.source } },
+];
+
+/** Canonical padded base64 with zero pad bits, including the empty encoding. */
+export const canonicalBase64Schema = z
+  .string()
+  .refine(isCanonicalBase64, "Expected canonical padded base64")
+  .meta({
+    allOf: [
+      ...paddedBase64SchemaRules,
+      { not: { pattern: INVALID_CANONICAL_BASE64_PAD_BITS_PATTERN.source } },
+    ],
+  });
