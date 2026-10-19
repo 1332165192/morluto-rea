@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 
 import {
   errorMessage,
