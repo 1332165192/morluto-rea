@@ -63,7 +63,7 @@ export async function verifyCoreInspectionTrace({
           "-s",
           "8192",
           "-e",
-          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd",
+          "trace=%process,%signal,%network,%file,ptrace,process_vm_readv,process_vm_writev,pidfd_open,pidfd_send_signal,pidfd_getfd,getpriority,setpriority",
           "-o",
           prefix,
           process.execPath,
