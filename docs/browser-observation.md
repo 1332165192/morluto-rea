@@ -288,6 +288,20 @@ Call `list_browser_targets` first because target IDs are browser-instance-specif
 
 REA establishes a main-frame origin boundary before enabling Runtime, Debugger, or Network observation, rechecks it before document capture, and validates it again afterward. If the main frame navigates during final capture, REA discards the mixed result and returns `target_changed`.
 
+The web-session timeline uses CDP monotonic seconds where the event producer
+provides a comparable timestamp; absent or invalid timestamps are `null` rather
+than a synthetic zero. Events buffered while REA samples the window boundary are
+retained only when their timestamp places them after that boundary; older events
+are excluded. A buffered event without a comparable timestamp may remain as
+contextual evidence with `timestamp: null`, accompanied by a limitation stating
+that it does not establish activity in the selected window. Main-frame scope
+enforcement still applies to contextual navigation events. Network redirect
+events retain their paired prior-hop response context when the timestamped
+next-request event falls inside the window. The pre-arm timeline buffer is bounded
+by original CDP message bytes. If clock sampling completes after that budget is
+exhausted, the operation returns `payload_limit` instead of a partial window.
+Cancellation and clock-request failures retain their own outcomes.
+
 ## Data minimization
 
 The Link projection parses repeated CDP header field lines independently and
@@ -331,7 +345,7 @@ REA retains local observation data and removes only URL userinfo credentials, ex
   WebSocket stream inventories and connection counts likewise require complete
   WebSocket coverage. Redirect resource types use only shared known metadata:
   an omitted type leaves equality unknown rather than proving a modification.
-- Console observations with a stack source retain call type, argument types, timestamp, and source location. When console text capture is selected, already-delivered primitive values are retained verbatim; objects, getters, and remote properties are never expanded.
+- Console observations with a stack source retain call type, argument types, the CDP `Runtime.Timestamp` in milliseconds since Unix epoch, and source location. An absent or invalid timestamp is `null` and makes `console_events` incomplete; an observed zero remains zero. This epoch-millisecond clock is separate from the monotonic-second timestamps in `observe-web-session`. When console text capture is selected, already-delivered primitive values are retained verbatim; objects, getters, and remote properties are never expanded.
 - WebSocket observations retain direction, opcode, and payload byte length. When shape capture is selected, text frames are classified as text or complete value-free JSON shape; binary bytes, hashes, prefixes, and raw frames are never retained.
 - Storage observations always redact values. Key names, IndexedDB names, and cache names require `include_storage_keys`; stable content fingerprints require the additional `include_storage_fingerprints` selection. Cookie fingerprints cover cookies applicable to the current main-frame URL, including its path, rather than every cookie path on that origin. Other storage remains scoped to the origin. Cache fingerprints hash all decoded response bytes, including bodies above 64 KiB, subject to the [64 MiB per-message CDP limit](#request-boundary). Missing or undecodable cache bodies and partial IndexedDB remote objects make fingerprint coverage incomplete, so identical observations remain `unknown`.
 - Unavailable or malformed storage inventories mark `storage_keys` unavailable, even without fingerprints. Comparisons suppress inferred key additions and removals while preserving modifications proven by complete fingerprints on both sides. Previously exported captures are not retroactively corrected; recapture them to obtain these coverage markers.
