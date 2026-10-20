@@ -322,7 +322,11 @@ does not emit a `changed_from` edge; its pairing and uncertainty remain in the i
 
 One-sided absence is `added` or `removed` only when the opposite input graph has
 complete coverage. With partial, unavailable, or truncated input, the same
-condition is `unknown`. The comparison retains every classified item and
+condition is `unknown`. A one-sided node whose observations are all
+`unavailable`, such as an unselected or failed parse scope, records an analysis
+gap rather than an application entity; it stays `unknown` with its
+`availability` and `coverage` dimensions and the gap's limitations, whatever
+the opposite coverage. The comparison retains every classified item and
 ambiguity candidate. Coverage carries omitted counts and limits from each input
 graph; comparison adds no caller-selected item, candidate, graph node, or edge
 budget. Unresolved comparison items are recorded as a residual unknown linked

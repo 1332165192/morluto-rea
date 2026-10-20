@@ -220,6 +220,17 @@ const leftOnlyItem = (
       dimensions: ["availability"],
       limitations: [AMBIGUOUS_MATCH_LIMITATION],
     });
+  const unavailable = unavailableAnalysisLimitations(node);
+  if (unavailable !== undefined)
+    return itemWithId({
+      ...common,
+      status: "unknown",
+      match: unmatchedMatch(),
+      dimensions: ["availability", "coverage"],
+      limitations: unavailable,
+      left_node_id: node.node_id,
+      right_node_id: null,
+    });
   const absenceObserved = absenceClaimable(context.rightGraph.coverage);
   return itemWithId({
     ...common,
@@ -260,6 +271,17 @@ const rightOnlyItem = (
       dimensions: ["availability"],
       limitations: [AMBIGUOUS_MATCH_LIMITATION],
     });
+  const unavailable = unavailableAnalysisLimitations(node);
+  if (unavailable !== undefined)
+    return itemWithId({
+      ...common,
+      status: "unknown",
+      match: unmatchedMatch(),
+      dimensions: ["availability", "coverage"],
+      limitations: unavailable,
+      left_node_id: null,
+      right_node_id: node.node_id,
+    });
   const absenceObserved = absenceClaimable(context.leftGraph.coverage);
   return itemWithId({
     ...common,
@@ -273,6 +295,23 @@ const rightOnlyItem = (
     limitations: absenceObserved ? [] : [INCOMPLETE_GRAPH_LIMITATION],
   });
 };
+
+/**
+ * An unmatched node whose every observation is unavailable is the producer's
+ * marker for an analysis gap, not a positive application entity, so its
+ * presence on one side cannot establish an addition or removal.
+ */
+const unavailableAnalysisLimitations = (
+  node: ApplicationNode,
+): string[] | undefined =>
+  node.observations.every(({ evidence }) => evidence.state === "unavailable")
+    ? [
+        ...new Set([
+          UNAVAILABLE_ANALYSIS_LIMITATION,
+          ...node.observations.flatMap(({ evidence }) => evidence.limitations),
+        ]),
+      ]
+    : undefined;
 
 const matchedMatch = (
   pair: ApplicationVersionNodePair,
@@ -328,6 +367,9 @@ const unmatchedMatch = (): Extract<
 
 const AMBIGUOUS_MATCH_LIMITATION =
   "Multiple nodes share the same permitted match key; no cross-version pair was selected.";
+const UNAVAILABLE_ANALYSIS_LIMITATION =
+  "This node records unavailable analysis on one side, so its absence from the other side is not an addition or removal.";
+
 const INCOMPLETE_GRAPH_LIMITATION =
   "The opposite graph is incomplete, so an unmatched node cannot be classified as added or removed.";
 

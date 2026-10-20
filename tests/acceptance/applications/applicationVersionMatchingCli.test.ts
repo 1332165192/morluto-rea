@@ -347,3 +347,91 @@ cliTest(
     ).toBe(true);
   },
 );
+
+cliTest(
+  "keeps unselected source scopes unknown while genuine additions remain added",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-version-unselected-");
+    const write = async (name: string, files: Record<string, string>) => {
+      const directory = join(root, name);
+      await mkdir(directory);
+      for (const [path, text] of Object.entries(files))
+        await writeFile(join(directory, path), text);
+      return directory;
+    };
+    const lib = "export function shared() {\n  return 1;\n}\n";
+    const main = 'export const name = "one";\n';
+    const full = await write("full", { "lib.js": lib, "main.js": main });
+    const copy = await write("copy", { "lib.js": lib, "main.js": main });
+    const mainOnly = await write("main-only", { "main.js": main });
+    const analyze = async (directory: string, ...selection: string[]) => {
+      const response = await cli.run({
+        arguments: [
+          "analyze-javascript-application",
+          directory,
+          ...selection,
+          "--json",
+        ],
+        environment: { REA_LOG_LEVEL: "silent" },
+      });
+      expect(response.exitCode, response.stderr).toBe(0);
+      return parseEvidence(response.json);
+    };
+    const compare = async (name: string, left: unknown, right: unknown) => {
+      const input = join(root, `${name}.json`);
+      await writeFile(input, JSON.stringify({ left, right }));
+      const response = await cli.run({
+        arguments: ["compare-application-versions", input, "--json"],
+        environment: { REA_LOG_LEVEL: "silent" },
+      });
+      expect(response.exitCode, response.stderr).toBe(0);
+      return applicationVersionComparisonResultSchema.parse(
+        parseEvidence(response.json).normalized_result,
+      );
+    };
+    const complete = await analyze(full);
+    const selected = await analyze(full, "--source-path", "main.js");
+    const scope = javascriptApplicationAnalysisResultSchema
+      .parse(selected.normalized_result)
+      .graph.nodes.find((node) =>
+        node.observations.some(
+          ({ properties }) =>
+            properties.path === "lib.js" &&
+            properties.operation === "select-javascript-sources",
+        ),
+      );
+    if (scope === undefined) throw new Error("Missing unselected scope");
+
+    for (const [name, left, right, side] of [
+      ["forward", complete, selected, "right_node_id"],
+      ["reverse", selected, complete, "left_node_id"],
+    ] as const) {
+      const result = await compare(name, left, right);
+      expect(result.summary).toMatchObject({ added: 0, removed: 0 });
+      const item = result.items.find((value) => value[side] === scope.node_id);
+      expect(item).toMatchObject({
+        status: "unknown",
+        node_kind: "unknown",
+        dimensions: ["availability", "coverage"],
+      });
+      expect(item?.limitations).toContain(
+        "Source is outside the caller-selected source_paths; it was inventoried but not analyzed.",
+      );
+    }
+
+    const control = await compare("control", complete, await analyze(copy));
+    expect(control.summary).toMatchObject({
+      added: 0,
+      removed: 0,
+      changed: 0,
+      unknown: 0,
+    });
+    const growth = await compare("growth", await analyze(mainOnly), complete);
+    expect(growth.items).toContainEqual(
+      expect.objectContaining({
+        status: "added",
+        node_kind: "javascript-asset",
+      }),
+    );
+  },
+);
