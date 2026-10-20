@@ -3,10 +3,11 @@ import { join } from "node:path";
 
 import { expect, it as test } from "vitest";
 
-import { inspectKunaProviderOwned as inspectKunaProvider } from "./kunaFileCloseOwner.js";
+import { inspectKunaProviderOwned as inspectKunaProvider } from "./kunaResourceScope.js";
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 import { fakeKunaCalls, writeFakeKuna } from "./fakeKuna.js";
 import { createSystemDoctorHost } from "../../../../src/doctorRuntime.js";
+import { runDoctorOwned } from "../../../../src/application/Doctor.js";
 import { AnalysisCancelledError } from "../../../../src/domain/analysisErrorCore.js";
 import { STARTUP_OWNER_CLOSED } from "../../../../src/process/SharedStartupAttempt.js";
 
@@ -176,7 +177,13 @@ it.each(["caller", "host"] as const)(
     );
     let closing: ReturnType<NonNullable<typeof host.close>> | undefined;
     try {
-      await expect.poll(async () => (await fakeKunaCalls(kuna)).length).toBe(1);
+      // The preceding Ghidra probe may prepare Darwin process ownership before
+      // Kuna starts; keep startup separate from the bounded post-abort join.
+      await expect
+        .poll(async () => (await fakeKunaCalls(kuna)).length, {
+          timeout: 10_000,
+        })
+        .toBe(1);
       const probe = (await fakeKunaCalls(kuna))[0];
       if (probe === undefined) throw new Error("Missing Kuna version probe");
       expect(probe.argv).toEqual(["--version"]);
@@ -238,6 +245,37 @@ it("keeps a healthy composed Kuna inspection when the caller stays active", asyn
           id: "kuna",
           available: true,
           providerVersion: "1.833",
+        }),
+      ]),
+    );
+    expect(await fakeKunaCalls(kuna)).toHaveLength(1);
+  } finally {
+    await host.close!();
+  }
+});
+
+it("projects the fake Kuna through the completed doctor workflow", async () => {
+  const root = await createTestTempDirectory("rea-kuna-public-doctor-");
+  const kuna = await writeFakeKuna(root);
+  const host = createSystemDoctorHost(
+    doctorEnvironment(root, kuna),
+    new AbortController().signal,
+  );
+  try {
+    const report = await runDoctorOwned(undefined, host, {
+      providers: ["kuna"],
+      skill: false,
+      clients: [],
+    });
+    expect(report.providerInspections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "kuna",
+          available: true,
+          providerVersion: "1.833",
+          checks: expect.arrayContaining([
+            expect.objectContaining({ name: "installation", ok: true }),
+          ]),
         }),
       ]),
     );
