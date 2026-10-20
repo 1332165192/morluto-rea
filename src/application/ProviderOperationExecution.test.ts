@@ -137,6 +137,30 @@ it("clears a non-JSON partial from the cleanup primary projection returns after 
   );
 });
 
+it("freezes one shared snapshot for a cleanup wrapper and its primary", () => {
+  const partial = { steps: ["kept"] };
+  const primary = new AnalysisCancelledError("capture_browser_scenario", {
+    cause: { requested: "stop during capture" },
+    partialObservation: partial as never,
+  });
+  const composed = analysisErrorWithCleanupFailure(
+    primary,
+    new ProviderCleanupError("fixture", ["browser"], {}),
+    "capture_browser_scenario",
+  );
+  keepIncompleteObservation(
+    composed,
+    "capture_browser_scenario",
+    "unused because the partial is JSON",
+  );
+
+  expect(composed.partialObservation).toBe(primary.partialObservation);
+  expect(composed.partialObservation).toEqual({ steps: ["kept"] });
+  expect(Object.isFrozen(composed.partialObservation)).toBe(true);
+  expect(composed.secondaryFailures).toHaveLength(0);
+  expect(primary.secondaryFailures).toHaveLength(0);
+});
+
 it("freezes a retained partial so a later mutation cannot break projection", () => {
   const partial = { steps: [] as unknown[] };
   const primary = new AnalysisCancelledError("capture_browser_scenario", {

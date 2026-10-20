@@ -2,6 +2,7 @@ import { z } from "zod";
 import type {
   AnalysisError,
   AnalysisErrorOptions,
+  AnalysisPartialObservation,
 } from "../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
@@ -116,22 +117,34 @@ export const keepIncompleteObservation = (
   reason: string,
 ): AnalysisError => {
   const seen = new Set<AnalysisError>();
+  // One source object can sit on a wrapper and its cleanup primary.
+  const judged = new Map<object, AnalysisPartialObservation | undefined>();
   let current: AnalysisError | undefined = error;
   while (current !== undefined && !seen.has(current)) {
     seen.add(current);
     const partial = current.partialObservation;
-    if (partial !== undefined && !isImmutableJsonSnapshot(partial)) {
-      // Validate without cloning. Copy only a partial that projection keeps.
-      if (jsonValueValidationIssue(partial) === undefined) {
-        current.partialObservation = freezeJsonSnapshot(
-          jsonValueSchema.parse(partial),
-        ) as typeof partial;
-      } else {
+    if (
+      partial !== undefined &&
+      !isImmutableJsonSnapshot(partial) &&
+      typeof partial === "object"
+    ) {
+      // Validate without cloning. Copy a kept partial once per source object.
+      let snapshot = judged.get(partial);
+      if (!judged.has(partial)) {
+        snapshot =
+          jsonValueValidationIssue(partial) === undefined
+            ? (freezeJsonSnapshot(
+                jsonValueSchema.parse(partial),
+              ) as AnalysisPartialObservation)
+            : undefined;
+        judged.set(partial, snapshot);
+      }
+      if (snapshot === undefined) {
         current.partialObservation = undefined;
         current.retainSecondaryFailure(
           new AnalysisOutputError(operation, reason),
         );
-      }
+      } else current.partialObservation = snapshot;
     }
     current = current.cleanupPrimary;
   }
