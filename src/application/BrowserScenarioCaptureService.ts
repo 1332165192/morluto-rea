@@ -43,6 +43,8 @@ export const captureBrowserScenario = async (
       partial.kind === "browser-scenario-observation"
     ) {
       const report = browserScenarioCaptureSchema.safeParse(partial.capture);
+      // Only a completed capture becomes Evidence. An incomplete observation
+      // stays on the owner error, including typed cancellation.
       if (
         report.success &&
         report.data.steps.every(({ status }) => status === "completed")
@@ -52,16 +54,6 @@ export const captureBrowserScenario = async (
           report.data,
           provider.identity(),
         );
-      } else if (!report.success) {
-        if (captured.error instanceof AnalysisCancelledError)
-          return err(
-            new AnalysisOutputError(
-              OPERATION,
-              "Browser scenario provider retained a malformed completed capture.",
-              { cause: report.error },
-            ),
-          );
-        return captured;
       }
     }
     return captured;

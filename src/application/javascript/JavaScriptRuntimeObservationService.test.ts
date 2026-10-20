@@ -5,6 +5,7 @@ import {
   AnalysisCancelledError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { err, ok } from "../../domain/result.js";
 import { parseEvidence } from "../../domain/evidence.js";
 import type { JavaScriptRuntimeTargetList } from "../../domain/javascript/javascriptRuntimeObservation.js";
@@ -317,3 +318,32 @@ it.each(["list", "observe"] as const)(
     expect(providerCalls).toBe(0);
   },
 );
+
+it("keeps cancellation when the retained runtime observation is incomplete", async () => {
+  const reason = { requested: "stop before runtime observation completed" };
+  const partial = { runtime: "partial", scripts: [] };
+  const failure = new AnalysisCancelledError("observe_javascript_runtime", {
+    cause: reason,
+    partialObservation: partial as never,
+  });
+  const provider: JavaScriptRuntimeObservationPort = {
+    identity: () => ({ id: "test", name: "Test", version: "1" }),
+    listTargets: async () =>
+      err(new AnalysisCancelledError("list_javascript_runtime_targets")),
+    observe: async () => err(failure),
+  };
+  const result = await observeJavaScriptRuntime(provider, {
+    inspector_endpoint: "http://127.0.0.1:9229",
+    target_id: "target",
+    observation_ms: 0,
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected cancellation");
+  expect(result.error).toBe(failure);
+  expect(result.error.cause).toBe(reason);
+  expect(result.error.partialObservation).toBe(partial);
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "cancelled",
+    details: { partial_observation: partial },
+  });
+});

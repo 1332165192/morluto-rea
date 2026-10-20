@@ -6,10 +6,14 @@ import {
   webListenersFixture,
 } from "./WebRuntimeService.fixture.js";
 import { err, ok } from "../domain/result.js";
-import { AnalysisTimeoutError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisOutputError,
+  AnalysisTimeoutError,
+} from "../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { parseEvidence } from "../domain/evidence.js";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 
 it("rejects malformed input and prior cancellation without calling a provider", async () => {
   const provider = recordingWebRuntimePort();
@@ -161,3 +165,61 @@ it("retains completed execution Evidence on late abort and keeps invalid output 
   });
   if (!invalid.ok) expect(invalid.error).toBeInstanceOf(AnalysisOutputError);
 });
+
+it.each([
+  {
+    operation: "observe" as const,
+    partial: {
+      instrumentation: { cleanup: "unconfirmed" },
+      window: { requested_ms: 5 },
+    },
+  },
+  {
+    operation: "inspect" as const,
+    partial: {
+      selected_node: { selector: "#selected" },
+      listeners: [],
+    },
+  },
+])(
+  "keeps $operation cancellation when the retained observation is incomplete",
+  async ({ operation, partial }) => {
+    const reason = { requested: `stop incomplete ${operation}` };
+    const failure = new AnalysisCancelledError(
+      operation === "observe"
+        ? "observe_web_execution"
+        : "inspect_web_event_listeners",
+      { cause: reason, partialObservation: partial as never },
+    );
+    const service = new WebRuntimeService({
+      identity: () => ({
+        id: "web-runtime",
+        name: "Runtime fixture",
+        version: "1",
+      }),
+      observeExecution: async () => err(failure),
+      inspectEventListeners: async () => err(failure),
+    });
+    const result =
+      operation === "observe"
+        ? await service.observe({
+            cdp_endpoint: "http://127.0.0.1:9222",
+            target_id: "selected-page",
+            observation_ms: 5,
+          })
+        : await service.inspect({
+            cdp_endpoint: "http://127.0.0.1:9222",
+            target_id: "selected-page",
+            selector: "#selected",
+          });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBe(partial);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+      details: { partial_observation: partial },
+    });
+  },
+);

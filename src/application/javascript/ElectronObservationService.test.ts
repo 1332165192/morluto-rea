@@ -5,6 +5,7 @@ import {
   AnalysisCancelledError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { parseEvidence } from "../../domain/evidence.js";
 import {
@@ -244,3 +245,32 @@ it.each(["list", "inspect"] as const)(
     expect(providerCalls).toBe(0);
   },
 );
+
+it("keeps cancellation when the retained Electron inspection is incomplete", async () => {
+  const reason = { requested: "stop before page inspection completed" };
+  const partial = {
+    kind: "electron-page-observation",
+    inspection: { target_id: "electron-page" },
+    cleanup: "incomplete",
+  };
+  const failure = new AnalysisCancelledError("inspect_electron_page", {
+    cause: reason,
+    partialObservation: partial as never,
+  });
+  const provider: ElectronObservationPort = {
+    identity: () => identity,
+    listTargets: async () =>
+      err(new AnalysisCancelledError("list_electron_targets")),
+    inspectPage: async () => err(failure),
+  };
+  const result = await inspectElectronPage(provider, input);
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected cancellation");
+  expect(result.error).toBe(failure);
+  expect(result.error.cause).toBe(reason);
+  expect(result.error.partialObservation).toBe(partial);
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "cancelled",
+    details: { partial_observation: partial },
+  });
+});
