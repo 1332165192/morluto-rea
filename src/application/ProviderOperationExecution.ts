@@ -9,7 +9,7 @@ import {
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import type { Evidence } from "../domain/evidence.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
+import { jsonValueValidationIssue } from "../domain/jsonValue.js";
 import { projectInputIssues } from "../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
@@ -106,7 +106,8 @@ export const keepIncompleteObservation = (
   reason: string,
 ): AnalysisError => {
   const partial = error.partialObservation;
-  if (partial === undefined || jsonValueSchema.safeParse(partial).success)
+  // Validate without cloning. Projection serializes a kept partial later.
+  if (partial === undefined || jsonValueValidationIssue(partial) === undefined)
     return error;
   error.partialObservation = undefined;
   return error.retainSecondaryFailure(
