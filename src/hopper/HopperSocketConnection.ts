@@ -30,7 +30,7 @@ export const connectHopperSocketOnce = (
     const onAbort = (): void => {
       detach();
       socket.destroy();
-      resolve(err(new HopperCancelledError()));
+      resolve(err(new HopperCancelledError(signal.reason)));
     };
     socket.once("connect", onConnect);
     socket.once("error", onError);

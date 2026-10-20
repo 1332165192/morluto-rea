@@ -66,7 +66,7 @@ export class HopperCancelledError extends HopperError {
   ) {
     super(
       "Hopper operation was cancelled",
-      cause === undefined ? options : { ...options, cause },
+      arguments.length === 0 ? options : { ...options, cause },
     );
   }
 }

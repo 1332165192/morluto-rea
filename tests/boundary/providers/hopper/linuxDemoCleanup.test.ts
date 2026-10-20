@@ -89,7 +89,8 @@ it("awaits cancellation-triggered final cleanup and retries the same retained ow
   // The client has attached its production supervisor before reaching connect.
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(launcher.helper.listenerCount("exit")).toBeGreaterThan(0);
-  controller.abort(new Error("fixture caller cancellation"));
+  const callerReason = { reason: "fixture caller cancellation", token: 17 };
+  controller.abort(callerReason);
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(
@@ -121,6 +122,10 @@ it("awaits cancellation-triggered final cleanup and retries the same retained ow
       cause: { cause: { _tag: "HopperCancelledError" } },
     },
   });
+  if (failed.ok) throw new Error("expected startup cancellation");
+  const cancelled = failed.error.cleanupPrimary;
+  expect(cancelled?._tag).toBe("HopperCancelledError");
+  expect(cancelled?.cause).toBe(callerReason);
 
   await expect(client.close()).resolves.toMatchObject({ ok: true });
   expect(launcher.cleanupGroup).toHaveBeenCalledTimes(2);

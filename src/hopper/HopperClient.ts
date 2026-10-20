@@ -313,11 +313,11 @@ export class HopperClient {
   /** Launch the bridge once while each caller retains its own cancellation. */
   start(signal?: AbortSignal): Promise<HopperStartupResult> {
     if (isAborted(signal))
-      return Promise.resolve(err(new HopperCancelledError()));
+      return Promise.resolve(err(new HopperCancelledError(signal?.reason)));
     if (this.#closePromise !== undefined)
       return waitForAbortable(this.#closePromise, signal).then((closed) =>
         closed === ABORTED
-          ? err(new HopperCancelledError())
+          ? err(new HopperCancelledError(signal?.reason))
           : closed.ok
             ? this.start(signal)
             : closed,
@@ -355,7 +355,7 @@ export class HopperClient {
     const waited = await attempt.wait(signal);
     if (waited.status === "completed") return waited.value;
     if (waited.status === "stopped" && !waited.value.ok) return waited.value;
-    return err(new HopperCancelledError());
+    return err(new HopperCancelledError(signal?.reason));
   }
 
   /** Cleanup belongs to the abandoned attempt, never to a prospective retry. */
@@ -365,7 +365,7 @@ export class HopperClient {
   ): Promise<HopperStartupResult> {
     const waited = await waitForAbortable(attempt.promise, signal);
     if (waited === ABORTED || (waited.ok && isAborted(signal)))
-      return err(new HopperCancelledError());
+      return err(new HopperCancelledError(signal?.reason));
     if (waited.ok || waited.error.cleanupIncomplete) return waited;
     return this.start(signal);
   }
@@ -373,7 +373,7 @@ export class HopperClient {
   async #start(
     signal?: AbortSignal,
   ): Promise<Result<HopperServerInfo, AnalysisError>> {
-    if (isAborted(signal)) return err(new HopperCancelledError());
+    if (isAborted(signal)) return err(new HopperCancelledError(signal?.reason));
     if (
       this.#socket !== undefined ||
       this.#resources.launch !== undefined ||
@@ -835,7 +835,7 @@ export class HopperClient {
     if (deadline.signal.reason === STARTUP_OWNER_CLOSED)
       return new HopperProtocolError("Hopper session closed during startup");
     if (deadline.interruption === "cancelled")
-      return new HopperCancelledError();
+      return new HopperCancelledError(deadline.signal.reason);
     return new HopperTimeoutError(
       deadline.timeoutMs,
       undefined,
@@ -969,7 +969,7 @@ export class HopperClient {
       );
     }
     if (options.signal?.aborted === true)
-      return err(new HopperCancelledError());
+      return err(new HopperCancelledError(options.signal.reason));
     const startedAt = performance.now();
     const result = await this.#requests.run(id, method, params, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),

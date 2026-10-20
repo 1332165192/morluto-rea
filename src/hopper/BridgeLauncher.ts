@@ -336,7 +336,8 @@ export class HopperApplicationLauncher implements BridgeLauncher {
     ];
     let launched = false;
     try {
-      if (signal?.aborted === true) return err(new HopperCancelledError());
+      if (signal?.aborted === true)
+        return err(new HopperCancelledError(signal.reason));
       let expectedLinuxSha256: string | undefined;
       if (usesLinuxDemo(this.options)) {
         const inspected = await (
@@ -344,7 +345,7 @@ export class HopperApplicationLauncher implements BridgeLauncher {
         )(this.options.launcherPath, this.options.environment, signal);
         if (!inspected.ok)
           return inspected.error.reason === "cancelled"
-            ? err(new HopperCancelledError())
+            ? err(new HopperCancelledError(signal?.reason))
             : err(
                 new HopperStartError({
                   userMessage: inspected.error.message,
@@ -371,7 +372,7 @@ export class HopperApplicationLauncher implements BridgeLauncher {
         this.options.environment,
         signal,
       );
-      if (!prepared) return err(new HopperCancelledError());
+      if (!prepared) return err(new HopperCancelledError(signal?.reason));
       const linuxDemo = linuxDemoLaunch(
         this.options,
         session,
@@ -388,7 +389,8 @@ export class HopperApplicationLauncher implements BridgeLauncher {
         linuxDemo,
         signal,
       });
-      if (started === null) return err(new HopperCancelledError());
+      if (started === null)
+        return err(new HopperCancelledError(signal?.reason));
       launched = true;
       const cleanup =
         linuxDemo === undefined
@@ -531,7 +533,7 @@ export class HopperApplicationLauncher implements BridgeLauncher {
       ...(signal === undefined ? {} : { signal }),
     });
     if (signal?.aborted === true)
-      return { ok: false, error: new HopperCancelledError() };
+      return { ok: false, error: new HopperCancelledError(signal.reason) };
     return selection.ok
       ? { ok: true, strategy: selection.strategy }
       : {
@@ -655,7 +657,7 @@ const hopperLaunchFailure = (
   signal: AbortSignal | undefined,
 ): HopperCancelledError | HopperStartError =>
   signal?.aborted === true
-    ? new HopperCancelledError()
+    ? new HopperCancelledError(signal.reason)
     : new HopperStartError({ cause });
 
 /** Select the publisher-verified demo adapter from the caller's explicit launch mode. */

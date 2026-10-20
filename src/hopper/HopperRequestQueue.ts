@@ -77,7 +77,9 @@ export class HopperRequestQueue {
     options: HopperRequestQueueOptions,
   ): Promise<HopperRequestResult> {
     if (options.signal?.aborted === true)
-      return Promise.resolve(err(new HopperCancelledError()));
+      return Promise.resolve(
+        err(new HopperCancelledError(options.signal.reason)),
+      );
     const timeoutMs = options.timeoutMs;
     if (
       timeoutMs !== undefined &&
@@ -107,7 +109,13 @@ export class HopperRequestQueue {
     return new Promise((resolve) => {
       let entry: QueuedRequest;
       const onAbort =
-        options.signal === undefined ? undefined : () => this.#cancel(entry);
+        options.signal === undefined
+          ? undefined
+          : () =>
+              this.#cancel(
+                entry,
+                new HopperCancelledError(options.signal?.reason),
+              );
       entry = {
         id,
         method,
@@ -239,7 +247,11 @@ export class HopperRequestQueue {
       return;
     }
     if (entry.signal?.aborted === true) {
-      this.#settleCaller(entry, err(new HopperCancelledError()), "cancelled");
+      this.#settleCaller(
+        entry,
+        err(new HopperCancelledError(entry.signal.reason)),
+        "cancelled",
+      );
       this.#drain();
       return;
     }
@@ -314,10 +326,7 @@ export class HopperRequestQueue {
     return entry.callerSettled;
   }
 
-  #cancel(
-    entry: QueuedRequest,
-    error: HopperError = new HopperCancelledError(),
-  ): void {
+  #cancel(entry: QueuedRequest, error: HopperError): void {
     if (entry.callerSettled) return;
     if (this.#active === entry) {
       this.#settleCaller(entry, err(error), "cancelled");
