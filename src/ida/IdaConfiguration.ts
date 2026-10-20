@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ConfigurationError } from "../domain/configurationErrors.js";
@@ -58,13 +58,9 @@ export const readIdaConfiguration = (
   path: string,
 ): Result<IdaConfiguration, ConfigurationError> => {
   try {
-    if (statSync(path).size > 65_536)
-      return err(
-        idaConfigurationError(
-          "REA_IDA_MCP_CONFIG exceeds the 64 KiB registration size.",
-        ),
-      );
-    const input: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const text = readRegistrationText(path);
+    if (!text.ok) return text;
+    const input: unknown = JSON.parse(text.value);
     const envelope = z
       .object({ mcpServers: z.object({ "ida-pro-mcp": z.unknown() }) })
       .safeParse(input);
@@ -88,6 +84,59 @@ export const readIdaConfiguration = (
     );
   }
 };
+
+const MAXIMUM_REGISTRATION_BYTES = 65_536;
+
+/**
+ * Read at most the registration limit from one regular file. Opening without
+ * blocking and checking the descriptor's type keeps a FIFO, socket or device
+ * from stalling synchronous diagnostics while it waits for a producer.
+ */
+const readRegistrationText = (
+  path: string,
+): Result<string, ConfigurationError> => {
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY |
+      (constants.O_NONBLOCK ?? 0) |
+      (constants.O_NOCTTY ?? 0),
+  );
+  try {
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile())
+      return err(
+        idaConfigurationError(
+          `REA_IDA_MCP_CONFIG must select a regular JSON file: ${path}`,
+        ),
+      );
+    if (metadata.size > MAXIMUM_REGISTRATION_BYTES)
+      return err(registrationTooLarge());
+    // One extra byte detects growth past the limit after fstat.
+    const bytes = Buffer.alloc(MAXIMUM_REGISTRATION_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const read = readSync(
+        descriptor,
+        bytes,
+        length,
+        bytes.length - length,
+        null,
+      );
+      if (read === 0) break;
+      length += read;
+    }
+    return length > MAXIMUM_REGISTRATION_BYTES
+      ? err(registrationTooLarge())
+      : ok(bytes.toString("utf8", 0, length));
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
+const registrationTooLarge = (): ConfigurationError =>
+  idaConfigurationError(
+    "REA_IDA_MCP_CONFIG exceeds the 64 KiB registration size.",
+  );
 
 /** A REA_IDA_MCP_CONFIG rejection that names the setting it concerns. */
 export const idaConfigurationError = (

@@ -58,6 +58,14 @@ describe("IDA registration and MCP result boundaries", () => {
     await writeFile(path, "malformed");
     expect(readIdaConfiguration(path).ok).toBe(false);
     expect(readIdaConfiguration(join(root, "absent")).ok).toBe(false);
+    const registration = JSON.stringify({ command: "python" });
+    await writeFile(path, registration.padEnd(65_536));
+    expect(readIdaConfiguration(path).ok).toBe(true);
+    await writeFile(path, registration.padEnd(65_537));
+    expect(readIdaConfiguration(path)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("64 KiB") },
+    });
   });
   it("parses FastMCP wrappers, structured dictionaries, text, arrays, and explicit errors", () => {
     expect(

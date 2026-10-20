@@ -1,3 +1,5 @@
+import { accessSync, constants, statSync } from "node:fs";
+
 import type {
   DoctorProviderCheck,
   DoctorProviderInspection,
@@ -13,7 +15,7 @@ export const inspectIdaRegistration = (
   const valid = parsed?.ok === true;
   const workspaceChecks =
     parsed?.ok === true && parsed.value.mode === "headless"
-      ? [inspectPrivateWorkspace()]
+      ? [inspectPrivateWorkspace(parsed.value.workspaceRoot)]
       : [];
   return {
     id: "ida",
@@ -47,21 +49,61 @@ export const inspectIdaRegistration = (
   };
 };
 
-const inspectPrivateWorkspace = (): DoctorProviderCheck => {
+/**
+ * Check private workspace authority and, when selected, the existing parent
+ * that IdaWorkspace.allocate creates its private directory in. Diagnosis only
+ * inspects the parent; it never creates or repairs it.
+ */
+const inspectPrivateWorkspace = (
+  workspaceRoot: string | undefined,
+): DoctorProviderCheck => {
   const privacy = privateRuntimeRootCapability();
-  return {
-    name: "private_workspace",
-    ok: privacy.available,
-    code: privacy.available ? null : privacy.code,
-    detail: privacy.available
-      ? `Private workspace authority is available (${privacy.proof}).`
-      : privacy.reason,
-    remediation: privacy.available ? null : privacy.remediation,
-    classification:
-      !privacy.available && privacy.code === "runtime_missing"
-        ? "missing_dependency"
-        : !privacy.available && privacy.code === "runtime_unavailable"
-          ? "runtime_failure"
-          : "unsupported_host",
-  };
+  if (!privacy.available)
+    return {
+      name: "private_workspace",
+      ok: false,
+      code: privacy.code,
+      detail: privacy.reason,
+      remediation: privacy.remediation,
+      classification:
+        privacy.code === "runtime_missing"
+          ? "missing_dependency"
+          : privacy.code === "runtime_unavailable"
+            ? "runtime_failure"
+            : "unsupported_host",
+    };
+  const unusable =
+    workspaceRoot === undefined
+      ? undefined
+      : workspaceRootFailure(workspaceRoot);
+  return unusable === undefined
+    ? {
+        name: "private_workspace",
+        ok: true,
+        code: null,
+        detail: `Private workspace authority is available (${privacy.proof})${workspaceRoot === undefined ? "" : ` under workspaceRoot ${workspaceRoot}`}.`,
+        remediation: null,
+        classification: "unsupported_host",
+      }
+    : {
+        name: "private_workspace",
+        ok: false,
+        code: "invalid_configuration",
+        detail: unusable,
+        remediation:
+          "Set the IDA registration's workspaceRoot to an existing directory REA can create entries in, or omit it to use the system temporary directory; see docs/ida-provider.md.",
+        classification: "config_drift",
+      };
+};
+
+/** Why the selected parent cannot hold a new private directory, if it cannot. */
+const workspaceRootFailure = (root: string): string | undefined => {
+  try {
+    if (!statSync(root).isDirectory())
+      return `IDA workspaceRoot ${root} is not a directory.`;
+    accessSync(root, constants.W_OK | constants.X_OK);
+    return undefined;
+  } catch (cause: unknown) {
+    return `IDA workspaceRoot ${root} is not a usable directory: ${cause instanceof Error ? cause.message : String(cause)}`;
+  }
 };
