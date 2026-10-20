@@ -186,7 +186,14 @@ export const execFileBytes = (
       if (stopped !== undefined) return;
       stopped = reason;
       child.kill(stopSignal);
-      grace = setTimeout(() => child.kill("SIGKILL"), STOP_GRACE_MS);
+      grace = setTimeout(() => {
+        child.kill("SIGKILL");
+        // execFile settles only once every output pipe closes. A descendant
+        // that inherited them can hold them open after the command exits, so
+        // stop reading at the end of the grace instead of waiting for it.
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, STOP_GRACE_MS);
     };
     const onAbort = (): void => {
       stop("abort");
