@@ -28,6 +28,10 @@ describe("modern Swift category evidence", () => {
       "$sSi4mainE7doubledSiyF",
       "$s9999999999999999999999BadVMa",
       "$s4main04PairVMa",
+      // Nested types named by punycode identifiers inside struct Envelope.
+      "_$s6Nested8EnvelopeV007IhuqBAbO8describeSSyF",
+      "_$s6Nested8EnvelopeV007jvrtDBlCAEycfC",
+      "_$s6Nested8EnvelopeV007jvrtDBlCMa",
     ];
     const result = categorizeSwiftTypes(
       names.map((name, index) => ({ address: String(index), name })),
@@ -50,6 +54,16 @@ describe("modern Swift category evidence", () => {
         pattern: "missing",
       }),
     ).toMatchObject({ total: 0, unclassified: [] });
+  });
+
+  it("keeps a nested punycode class unresolved under a class filter", () => {
+    const name = "_$s6Nested8EnvelopeV007jvrtDBlCMa";
+    expect(
+      categorizeSwiftTypes([{ address: "0x1", name }], { category: "classes" }),
+    ).toMatchObject({
+      total: 0,
+      unclassified: [{ name, reason: "category_not_decoded" }],
+    });
   });
 
   it("deduplicates display names after selecting a category", () => {

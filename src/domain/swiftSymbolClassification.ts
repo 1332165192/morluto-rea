@@ -38,7 +38,12 @@ export const classifySwiftSymbol = (
   let category: SwiftTypeCategory | null = null;
   for (;;) {
     const end = identifierEnd(mangling, offset);
-    if (end === undefined) break;
+    if (end === undefined) {
+      // A word-substituted or punycode identifier (`0…`) may name a nested
+      // type of any kind, so the enclosing nominal no longer decides it.
+      if (mangling.charAt(offset) === "0") category = null;
+      break;
+    }
     const kind = mangling.charAt(end);
     const nominal = NOMINAL_CATEGORIES.get(kind);
     if (nominal === undefined) {
