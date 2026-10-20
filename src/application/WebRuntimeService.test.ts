@@ -17,7 +17,7 @@ import {
   expectDroppedPartial,
   expectKeptPartial,
   expectOwnerError,
-} from "./ownerObservationExpectation.js";
+} from "./ownerObservationExpectation.fixture.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { parseEvidence } from "../domain/evidence.js";
 

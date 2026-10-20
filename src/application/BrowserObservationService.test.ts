@@ -12,7 +12,7 @@ import {
   expectDroppedPartial,
   expectKeptPartial,
   expectOwnerError,
-} from "./ownerObservationExpectation.js";
+} from "./ownerObservationExpectation.fixture.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { err, ok } from "../domain/result.js";
 import { passiveNetworkCapture } from "../../tests/fixtures/passiveNetworkCapture.js";

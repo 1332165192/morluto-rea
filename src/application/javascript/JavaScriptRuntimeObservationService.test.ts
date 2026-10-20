@@ -18,7 +18,7 @@ import {
   expectDroppedPartial,
   expectKeptPartial,
   expectOwnerError,
-} from "../ownerObservationExpectation.js";
+} from "../ownerObservationExpectation.fixture.js";
 
 it("preserves failed Inspector cleanup when cancellation occurs during observation", async () => {
   const controller = new AbortController();

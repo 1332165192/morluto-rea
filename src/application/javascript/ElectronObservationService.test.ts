@@ -22,7 +22,7 @@ import {
   expectDroppedPartial,
   expectKeptPartial,
   expectOwnerError,
-} from "../ownerObservationExpectation.js";
+} from "../ownerObservationExpectation.fixture.js";
 
 const identity = { id: "electron-fixture", name: "Fixture", version: "1" };
 const input = inspectElectronPageInputSchema.parse({

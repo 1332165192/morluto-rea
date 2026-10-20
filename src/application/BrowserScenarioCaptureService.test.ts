@@ -19,7 +19,7 @@ import {
   expectDroppedPartial,
   expectKeptPartial,
   expectOwnerError,
-} from "./ownerObservationExpectation.js";
+} from "./ownerObservationExpectation.fixture.js";
 
 const scenario = browserScenarioInputSchema.parse({
   browser: { mode: "launch", executable_path: "/fixture/chrome" },
