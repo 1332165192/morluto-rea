@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
   AnalysisOutputError,
@@ -27,6 +28,34 @@ const scenario = browserScenarioInputSchema.parse({
   actions: [{ step_id: "settle", action: "wait_for_timeout", duration_ms: 1 }],
 });
 const capture = scriptScenarioFixture();
+const scenarioIdentity = {
+  id: "scenario-fixture",
+  name: "Scenario fixture",
+  version: "1",
+};
+const runScenario = (
+  failure: AnalysisError,
+  id = { id: "fixture", name: "fixture", version: "1" },
+) =>
+  captureBrowserScenario(
+    {
+      identity: () => id,
+      captureScenario: async () => err(failure),
+    },
+    scenario,
+  );
+const expectRetainedCapture = (
+  result: Awaited<ReturnType<typeof runScenario>>,
+  failure: AnalysisError,
+) => {
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected the retained capture");
+  expect(result.error).toBe(failure);
+  expect(parseEvidence(result.error.partialObservation)).toMatchObject({
+    operation: "capture_browser_scenario",
+    normalized_result: capture,
+  });
+};
 
 it("converts a retained raw scenario capture into partial Evidence", async () => {
   const failure = new AnalysisCancelledError("capture_browser_scenario", {
@@ -35,23 +64,7 @@ it("converts a retained raw scenario capture into partial Evidence", async () =>
       capture,
     },
   });
-  const provider: BrowserScenarioCapturePort = {
-    identity: () => ({
-      id: "scenario-fixture",
-      name: "Scenario fixture",
-      version: "1",
-    }),
-    captureScenario: async () => err(failure),
-  };
-  const result = await captureBrowserScenario(provider, scenario);
-  expect(result.ok).toBe(false);
-  if (!result.ok) {
-    expect(result.error).toBe(failure);
-    expect(parseEvidence(result.error.partialObservation)).toMatchObject({
-      operation: "capture_browser_scenario",
-      normalized_result: capture,
-    });
-  }
+  expectRetainedCapture(await runScenario(failure, scenarioIdentity), failure);
 });
 
 it("converts a raw scenario capture retained after cleanup failure", async () => {
@@ -69,24 +82,9 @@ it("converts a raw scenario capture retained after cleanup failure", async () =>
       },
     },
   );
-  const provider: BrowserScenarioCapturePort = {
-    identity: () => ({
-      id: "scenario-fixture",
-      name: "Scenario fixture",
-      version: "1",
-    }),
-    captureScenario: async () => err(failure),
-  };
-  const result = await captureBrowserScenario(provider, scenario);
-  expect(result.ok).toBe(false);
-  if (!result.ok) {
-    expect(result.error).toBe(failure);
-    expect(result.error.cleanupIncomplete).toBe(true);
-    expect(parseEvidence(result.error.partialObservation)).toMatchObject({
-      operation: "capture_browser_scenario",
-      normalized_result: capture,
-    });
-  }
+  const result = await runScenario(failure, scenarioIdentity);
+  expectRetainedCapture(result, failure);
+  if (!result.ok) expect(result.error.cleanupIncomplete).toBe(true);
 });
 
 it.each([
@@ -137,11 +135,7 @@ it("keeps startup cancellation and its incomplete capture", async () => {
     cause: reason,
     partialObservation: partial,
   });
-  const provider: BrowserScenarioCapturePort = {
-    identity: () => ({ id: "fixture", name: "fixture", version: "1" }),
-    captureScenario: async () => err(failure),
-  };
-  const result = await captureBrowserScenario(provider, scenario);
+  const result = await runScenario(failure);
   expectKeptPartial(expectOwnerError(result, failure, reason), partial);
 });
 
@@ -157,11 +151,7 @@ it.each([{ steps: [undefined] }, { started_at: Number.NaN }])(
       cause: reason,
       partialObservation: partial,
     });
-    const provider: BrowserScenarioCapturePort = {
-      identity: () => ({ id: "fixture", name: "fixture", version: "1" }),
-      captureScenario: async () => err(failure),
-    };
-    const result = await captureBrowserScenario(provider, scenario);
+    const result = await runScenario(failure);
     expectDroppedPartial(
       expectOwnerError(result, failure, reason),
       "Browser scenario provider retained a non-JSON incomplete observation.",

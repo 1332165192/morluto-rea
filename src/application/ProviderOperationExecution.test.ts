@@ -98,17 +98,23 @@ it("preserves operation correction outside the input envelope", async () => {
   expect(execute).not.toHaveBeenCalled();
 });
 
-it("clears a non-JSON partial from the cleanup primary projection returns after retry", () => {
-  const partial = { steps: [] as unknown[] };
-  const primary = new AnalysisCancelledError("capture_browser_scenario", {
+const cancelledScenario = (partial: unknown) =>
+  new AnalysisCancelledError("capture_browser_scenario", {
     cause: { requested: "stop during capture" },
     partialObservation: partial as never,
   });
-  const composed = analysisErrorWithCleanupFailure(
+
+const wrapScenarioCleanup = (primary: AnalysisCancelledError) =>
+  analysisErrorWithCleanupFailure(
     primary,
     new ProviderCleanupError("fixture", ["browser"], {}),
     "capture_browser_scenario",
   );
+
+it("clears a non-JSON partial from the cleanup primary projection returns after retry", () => {
+  const partial = { steps: [] as unknown[] };
+  const primary = cancelledScenario(partial);
+  const composed = wrapScenarioCleanup(primary);
   partial.steps.push(undefined);
   const reason =
     "Browser scenario provider retained a non-JSON incomplete observation.";
@@ -139,15 +145,8 @@ it("clears a non-JSON partial from the cleanup primary projection returns after 
 
 it("freezes one shared snapshot for a cleanup wrapper and its primary", () => {
   const partial = { steps: ["kept"] };
-  const primary = new AnalysisCancelledError("capture_browser_scenario", {
-    cause: { requested: "stop during capture" },
-    partialObservation: partial as never,
-  });
-  const composed = analysisErrorWithCleanupFailure(
-    primary,
-    new ProviderCleanupError("fixture", ["browser"], {}),
-    "capture_browser_scenario",
-  );
+  const primary = cancelledScenario(partial);
+  const composed = wrapScenarioCleanup(primary);
   keepIncompleteObservation(
     composed,
     "capture_browser_scenario",
@@ -163,10 +162,7 @@ it("freezes one shared snapshot for a cleanup wrapper and its primary", () => {
 
 it("freezes a retained partial so a later mutation cannot break projection", () => {
   const partial = { steps: [] as unknown[] };
-  const primary = new AnalysisCancelledError("capture_browser_scenario", {
-    cause: { requested: "stop during capture" },
-    partialObservation: partial as never,
-  });
+  const primary = cancelledScenario(partial);
   keepIncompleteObservation(
     primary,
     "capture_browser_scenario",

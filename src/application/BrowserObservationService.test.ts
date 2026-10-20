@@ -11,6 +11,7 @@ import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import {
   expectDroppedPartial,
   expectKeptPartial,
+  expectOutputError,
   expectOwnerError,
 } from "./ownerObservationExpectation.fixture.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
@@ -80,11 +81,7 @@ it("does not let late cancellation hide invalid completed browser output", async
     provider(async () => ok(malformed)),
     input,
   );
-  expect(output).toMatchObject({
-    ok: false,
-    error: { _tag: "AnalysisOutputError" },
-  });
-  if (!output.ok) expect(output.error).toBeInstanceOf(AnalysisOutputError);
+  expectOutputError(output);
 
   const controller = new AbortController();
   const late = await listBrowserTargets(
@@ -95,11 +92,7 @@ it("does not let late cancellation hide invalid completed browser output", async
     input,
     { signal: controller.signal },
   );
-  expect(late).toMatchObject({
-    ok: false,
-    error: { _tag: "AnalysisOutputError" },
-  });
-  if (!late.ok) expect(late.error).toBeInstanceOf(AnalysisOutputError);
+  expectOutputError(late);
 });
 
 it("converts a raw page inspection retained after browser cleanup failure", async () => {

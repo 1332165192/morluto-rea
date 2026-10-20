@@ -93,11 +93,7 @@ it("converts raw execution retained by provider cleanup failure into partial Evi
     { operation: "observe_web_execution", partialObservation: execution },
   );
   const result = await new WebRuntimeService({
-    identity: () => ({
-      id: "web-runtime",
-      name: "Runtime fixture",
-      version: "1",
-    }),
+    identity: runtimeIdentity,
     observeExecution: async () => err(failure),
     inspectEventListeners: async () => err(failure),
   }).observe(args);
@@ -172,16 +168,18 @@ it("retains completed execution Evidence on late abort and keeps invalid output 
   if (!invalid.ok) expect(invalid.error).toBeInstanceOf(AnalysisOutputError);
 });
 
+const runtimeIdentity = () => ({
+  id: "web-runtime",
+  name: "Runtime fixture",
+  version: "1",
+});
+
 const callRuntime = (
   operation: "observe" | "inspect",
   failure: AnalysisError,
 ) => {
   const service = new WebRuntimeService({
-    identity: () => ({
-      id: "web-runtime",
-      name: "Runtime fixture",
-      version: "1",
-    }),
+    identity: runtimeIdentity,
     observeExecution: async () => err(failure),
     inspectEventListeners: async () => err(failure),
   });
