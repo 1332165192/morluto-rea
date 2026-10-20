@@ -18,7 +18,10 @@ import {
   inspectWebEventListenersInputSchema,
   webEventListenersSchema,
 } from "../domain/webEventListeners.js";
-import { completeProviderEvidence } from "./ProviderOperationExecution.js";
+import {
+  completeProviderEvidence,
+  keepIncompleteObservation,
+} from "./ProviderOperationExecution.js";
 
 /** Shared public workflows keep instrumentation and listener inspection independently selectable. */
 export class WebRuntimeService {
@@ -53,12 +56,20 @@ export class WebRuntimeService {
             parsed.value,
             verifiedPartial.data,
           );
-          if (evidence.ok) result.error.partialObservation = evidence.value;
-          else if (result.error instanceof AnalysisCancelledError)
-            return evidence;
+          if (evidence.ok) {
+            result.error.partialObservation = evidence.value;
+            return result;
+          }
+          if (result.error instanceof AnalysisCancelledError) return evidence;
         }
       }
-      return result;
+      return err(
+        keepIncompleteObservation(
+          result.error,
+          operation,
+          "Provider retained a non-JSON incomplete execution observation.",
+        ),
+      );
     }
     const verified = webExecutionSchema.safeParse(result.value);
     if (!verified.success)
@@ -108,12 +119,20 @@ export class WebRuntimeService {
             parsed.value,
             verifiedPartial.data,
           );
-          if (evidence.ok) result.error.partialObservation = evidence.value;
-          else if (result.error instanceof AnalysisCancelledError)
-            return evidence;
+          if (evidence.ok) {
+            result.error.partialObservation = evidence.value;
+            return result;
+          }
+          if (result.error instanceof AnalysisCancelledError) return evidence;
         }
       }
-      return result;
+      return err(
+        keepIncompleteObservation(
+          result.error,
+          operation,
+          "Provider retained a non-JSON incomplete event-listener observation.",
+        ),
+      );
     }
     const verified = webEventListenersSchema.safeParse(result.value);
     if (!verified.success)

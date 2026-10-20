@@ -143,11 +143,48 @@ it("keeps startup cancellation and its incomplete capture", async () => {
   expect(result.error).toBe(failure);
   expect(result.error.cause).toBe(reason);
   expect(result.error.partialObservation).toBe(partial);
+  expect(result.error.secondaryFailures).toHaveLength(0);
   expect(projectAnalysisError(result.error)).toMatchObject({
     code: "cancelled",
     details: { partial_observation: partial },
   });
 });
+
+it.each([{ steps: [undefined] }, { started_at: Number.NaN }])(
+  "drops a non-JSON incomplete scenario capture and keeps cancellation primary",
+  async (capturePartial) => {
+    const reason = { requested: "stop during initial navigation" };
+    const partial: BrowserScenarioPartialObservation = {
+      kind: "browser-scenario-observation",
+      capture: capturePartial as never,
+    };
+    const failure = new AnalysisCancelledError("capture_browser_scenario", {
+      cause: reason,
+      partialObservation: partial,
+    });
+    const provider: BrowserScenarioCapturePort = {
+      identity: () => ({ id: "fixture", name: "fixture", version: "1" }),
+      captureScenario: async () => err(failure),
+    };
+    const result = await captureBrowserScenario(provider, scenario);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures).toMatchObject([
+      {
+        _tag: "AnalysisOutputError",
+        operation: "capture_browser_scenario",
+        reason:
+          "Browser scenario provider retained a non-JSON incomplete observation.",
+      },
+    ]);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+    });
+  },
+);
 
 it("rejects a successful capture that is not a completed scenario", async () => {
   const provider: BrowserScenarioCapturePort = {

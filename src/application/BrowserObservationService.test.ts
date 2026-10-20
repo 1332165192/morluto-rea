@@ -248,6 +248,7 @@ it("keeps page cancellation when the retained inspection is incomplete", async (
   expect(result.error).toBe(failure);
   expect(result.error.cause).toBe(reason);
   expect(result.error.partialObservation).toBe(partial);
+  expect(result.error.secondaryFailures).toHaveLength(0);
   expect(projectAnalysisError(result.error)).toMatchObject({
     code: "cancelled",
     details: { partial_observation: partial },
@@ -281,9 +282,122 @@ it("keeps bundle cancellation and an earlier failure when retained facts are inc
     if (result.ok) throw new Error("Expected the owner failure");
     expect(result.error).toBe(failure);
     expect(result.error.partialObservation).toBe(partial);
+    expect(result.error.secondaryFailures).toHaveLength(0);
   }
   expect(projectAnalysisError(cancelled)).toMatchObject({
     code: "cancelled",
     details: { partial_observation: partial },
   });
 });
+
+const pageInput = () =>
+  inspectWebPageInputSchema.parse({
+    cdp_endpoint: input.cdp_endpoint.recorded,
+    allowed_origins: [],
+    target_id: "page",
+    observation_ms: 0,
+    include_script_sources: false,
+  });
+
+const bundleInput = () =>
+  analyzeWebBundleInputSchema.parse({
+    cdp_endpoint: input.cdp_endpoint.recorded,
+    target_id: "page",
+    observation_ms: 0,
+  });
+
+const browserReturning = (
+  failure: BrowserObservationError | AnalysisCancelledError,
+) =>
+  ({
+    ...provider(async () => ok(report)),
+    inspectPage: async () => err(failure),
+    analyzeBundle: async () => err(failure),
+  }) as unknown as BrowserObservationPort;
+
+it.each([
+  {
+    name: "bundle bytes",
+    operation: "analyze_web_bundle" as const,
+    partial: { observations: [], capture: { bytes: Number.NaN } },
+  },
+  {
+    name: "bundle observations",
+    operation: "analyze_web_bundle" as const,
+    partial: { observations: [undefined], capture: {} },
+  },
+  {
+    name: "page requests",
+    operation: "inspect_web_page" as const,
+    partial: {
+      target: { target_id: "page" },
+      network: { requests: Number.NaN },
+      capture_window: {},
+    },
+  },
+])(
+  "drops a non-JSON $name partial and keeps cancellation primary",
+  async ({ operation, partial }) => {
+    const reason = { requested: `stop ${operation}` };
+    const failure = new AnalysisCancelledError(operation, {
+      cause: reason,
+      partialObservation: partial as never,
+    });
+    const result =
+      operation === "inspect_web_page"
+        ? await inspectWebPage(browserReturning(failure), pageInput())
+        : await analyzeWebBundle(browserReturning(failure), bundleInput());
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures).toMatchObject([
+      {
+        _tag: "AnalysisOutputError",
+        operation,
+        reason: "Browser provider retained a non-JSON incomplete observation.",
+      },
+    ]);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+    });
+    expect(projectAnalysisError(result.error).details).not.toHaveProperty(
+      "partial_observation",
+    );
+  },
+);
+
+it.each([
+  {
+    name: "schema-shaped page",
+    partial: {
+      target: { target_id: "page" },
+      network: { requests: Number.NaN },
+      capture_window: {},
+    },
+  },
+  {
+    name: "shapeless page",
+    partial: { requests: Number.NaN },
+  },
+])(
+  "drops a non-JSON $name partial and keeps timeout primary",
+  async ({ partial }) => {
+    const failure = new BrowserObservationError("inspect_web_page", "timeout", {
+      partialObservation: partial as never,
+    });
+    const result = await inspectWebPage(browserReturning(failure), pageInput());
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected timeout");
+    expect(result.error).toBe(failure);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures[0]).toBeInstanceOf(
+      AnalysisOutputError,
+    );
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "provider_timeout",
+      category: "timeout",
+    });
+  },
+);

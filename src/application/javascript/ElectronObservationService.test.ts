@@ -269,8 +269,51 @@ it("keeps cancellation when the retained Electron inspection is incomplete", asy
   expect(result.error).toBe(failure);
   expect(result.error.cause).toBe(reason);
   expect(result.error.partialObservation).toBe(partial);
+  expect(result.error.secondaryFailures).toHaveLength(0);
   expect(projectAnalysisError(result.error)).toMatchObject({
     code: "cancelled",
     details: { partial_observation: partial },
   });
 });
+
+it.each([
+  { inspection: { requests: Number.NaN }, cleanup: "incomplete" as const },
+  {
+    inspection: { scripts: [undefined] },
+    cleanup: "transport-closed" as const,
+  },
+])(
+  "drops a non-JSON Electron inspection and keeps cancellation primary",
+  async (unsafe) => {
+    const reason = { requested: "stop before page inspection completed" };
+    const failure = new AnalysisCancelledError("inspect_electron_page", {
+      cause: reason,
+      partialObservation: {
+        kind: "electron-page-observation",
+        ...unsafe,
+      } as never,
+    });
+    const provider: ElectronObservationPort = {
+      identity: () => identity,
+      listTargets: async () =>
+        err(new AnalysisCancelledError("list_electron_targets")),
+      inspectPage: async () => err(failure),
+    };
+    const result = await inspectElectronPage(provider, input);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures).toMatchObject([
+      {
+        _tag: "AnalysisOutputError",
+        operation: "inspect_electron_page",
+        reason: "Electron provider retained a non-JSON incomplete observation.",
+      },
+    ]);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+    });
+  },
+);

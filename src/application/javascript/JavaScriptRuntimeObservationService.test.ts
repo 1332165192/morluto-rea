@@ -342,8 +342,46 @@ it("keeps cancellation when the retained runtime observation is incomplete", asy
   expect(result.error).toBe(failure);
   expect(result.error.cause).toBe(reason);
   expect(result.error.partialObservation).toBe(partial);
+  expect(result.error.secondaryFailures).toHaveLength(0);
   expect(projectAnalysisError(result.error)).toMatchObject({
     code: "cancelled",
     details: { partial_observation: partial },
   });
 });
+
+it.each([{ scripts: [undefined] }, { elapsed_ms: Number.NaN }])(
+  "drops a non-JSON runtime partial and keeps cancellation primary",
+  async (partial) => {
+    const reason = { requested: "stop before runtime observation completed" };
+    const failure = new AnalysisCancelledError("observe_javascript_runtime", {
+      cause: reason,
+      partialObservation: partial as never,
+    });
+    const provider: JavaScriptRuntimeObservationPort = {
+      identity: () => ({ id: "test", name: "Test", version: "1" }),
+      listTargets: async () =>
+        err(new AnalysisCancelledError("list_javascript_runtime_targets")),
+      observe: async () => err(failure),
+    };
+    const result = await observeJavaScriptRuntime(provider, {
+      inspector_endpoint: "http://127.0.0.1:9229",
+      target_id: "target",
+      observation_ms: 0,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures).toMatchObject([
+      {
+        _tag: "AnalysisOutputError",
+        operation: "observe_javascript_runtime",
+        reason: "Inspector retained a non-JSON incomplete observation.",
+      },
+    ]);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+    });
+  },
+);

@@ -217,9 +217,105 @@ it.each([
     expect(result.error).toBe(failure);
     expect(result.error.cause).toBe(reason);
     expect(result.error.partialObservation).toBe(partial);
+    expect(result.error.secondaryFailures).toHaveLength(0);
     expect(projectAnalysisError(result.error)).toMatchObject({
       code: "cancelled",
       details: { partial_observation: partial },
     });
   },
 );
+
+it.each([
+  {
+    operation: "observe" as const,
+    partial: {
+      instrumentation: { cleanup: "unconfirmed" },
+      window: { requested_ms: Number.NaN },
+    },
+    reason: "Provider retained a non-JSON incomplete execution observation.",
+  },
+  {
+    operation: "inspect" as const,
+    partial: {
+      selected_node: { selector: "#selected" },
+      listeners: [undefined],
+    },
+    reason:
+      "Provider retained a non-JSON incomplete event-listener observation.",
+  },
+])(
+  "drops a non-JSON $operation partial and keeps cancellation primary",
+  async ({ operation, partial, reason: outputReason }) => {
+    const reason = { requested: `stop unsafe ${operation}` };
+    const failure = new AnalysisCancelledError(
+      operation === "observe"
+        ? "observe_web_execution"
+        : "inspect_web_event_listeners",
+      { cause: reason, partialObservation: partial as never },
+    );
+    const service = new WebRuntimeService({
+      identity: () => ({
+        id: "web-runtime",
+        name: "Runtime fixture",
+        version: "1",
+      }),
+      observeExecution: async () => err(failure),
+      inspectEventListeners: async () => err(failure),
+    });
+    const result =
+      operation === "observe"
+        ? await service.observe({
+            cdp_endpoint: "http://127.0.0.1:9222",
+            target_id: "selected-page",
+            observation_ms: 5,
+          })
+        : await service.inspect({
+            cdp_endpoint: "http://127.0.0.1:9222",
+            target_id: "selected-page",
+            selector: "#selected",
+          });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBe(failure);
+    expect(result.error.cause).toBe(reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.secondaryFailures).toMatchObject([
+      { _tag: "AnalysisOutputError", reason: outputReason },
+    ]);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "cancelled",
+    });
+  },
+);
+
+it("drops a non-JSON execution partial and keeps timeout primary", async () => {
+  const failure = new AnalysisTimeoutError("observe_web_execution", 5, {
+    partialObservation: {
+      instrumentation: { samples: [undefined] },
+      window: { requested_ms: 5 },
+    } as never,
+  });
+  const service = new WebRuntimeService({
+    identity: () => ({
+      id: "web-runtime",
+      name: "Runtime fixture",
+      version: "1",
+    }),
+    observeExecution: async () => err(failure),
+    inspectEventListeners: async () => err(failure),
+  });
+  const result = await service.observe({
+    cdp_endpoint: "http://127.0.0.1:9222",
+    target_id: "selected-page",
+    observation_ms: 5,
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected timeout");
+  expect(result.error).toBe(failure);
+  expect(result.error.partialObservation).toBeUndefined();
+  expect(result.error.secondaryFailures[0]).toBeInstanceOf(AnalysisOutputError);
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "provider_timeout",
+    category: "timeout",
+  });
+});
