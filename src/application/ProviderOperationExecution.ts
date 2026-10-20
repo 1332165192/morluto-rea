@@ -14,10 +14,7 @@ import {
   freezeJsonSnapshot,
   isImmutableJsonSnapshot,
 } from "../domain/immutableJson.js";
-import {
-  jsonValueSchema,
-  jsonValueValidationIssue,
-} from "../domain/jsonValue.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
 import { projectInputIssues } from "../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
@@ -128,15 +125,13 @@ export const keepIncompleteObservation = (
       !isImmutableJsonSnapshot(partial) &&
       typeof partial === "object"
     ) {
-      // Validate without cloning. Copy a kept partial once per source object.
+      // safeParse clones only after validation succeeds. Freeze that copy once.
       let snapshot = judged.get(partial);
       if (!judged.has(partial)) {
-        snapshot =
-          jsonValueValidationIssue(partial) === undefined
-            ? (freezeJsonSnapshot(
-                jsonValueSchema.parse(partial),
-              ) as AnalysisPartialObservation)
-            : undefined;
+        const parsed = jsonValueSchema.safeParse(partial);
+        snapshot = parsed.success
+          ? (freezeJsonSnapshot(parsed.data) as AnalysisPartialObservation)
+          : undefined;
         judged.set(partial, snapshot);
       }
       if (snapshot === undefined) {
