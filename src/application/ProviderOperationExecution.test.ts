@@ -1,8 +1,18 @@
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { AnalysisInputError } from "../domain/analysisErrorCore.js";
-import { executeProviderOperation } from "./ProviderOperationExecution.js";
+import {
+  AnalysisCancelledError,
+  AnalysisInputError,
+  AnalysisOutputError,
+} from "../domain/analysisErrorCore.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import {
+  executeProviderOperation,
+  keepIncompleteObservation,
+} from "./ProviderOperationExecution.js";
 
 it("projects request-schema issues without exposing the request envelope", async () => {
   const execute = vi.fn();
@@ -86,4 +96,43 @@ it("preserves operation correction outside the input envelope", async () => {
     { path: ["operation"], reason: "invalid_value", expected: ["known"] },
   ]);
   expect(execute).not.toHaveBeenCalled();
+});
+
+it("clears a non-JSON partial from the cleanup primary projection returns after retry", () => {
+  const partial = { steps: [] as unknown[] };
+  const primary = new AnalysisCancelledError("capture_browser_scenario", {
+    cause: { requested: "stop during capture" },
+    partialObservation: partial as never,
+  });
+  const composed = analysisErrorWithCleanupFailure(
+    primary,
+    new ProviderCleanupError("fixture", ["browser"], {}),
+    "capture_browser_scenario",
+  );
+  partial.steps.push(undefined);
+  const reason =
+    "Browser scenario provider retained a non-JSON incomplete observation.";
+  const retained = keepIncompleteObservation(
+    composed,
+    "capture_browser_scenario",
+    reason,
+  );
+
+  expect(retained).toBe(composed);
+  expect(composed.partialObservation).toBeUndefined();
+  expect(primary.partialObservation).toBeUndefined();
+  expect(composed.secondaryFailures).toMatchObject([
+    { _tag: "AnalysisOutputError", reason },
+  ]);
+  expect(primary.secondaryFailures[0]).toBeInstanceOf(AnalysisOutputError);
+  expect(projectAnalysisError(composed).code).toBe("cleanup_incomplete");
+
+  composed.resolveCleanup();
+  expect(projectAnalysisError(composed)).toMatchObject({
+    code: "cancelled",
+    category: "cancelled",
+  });
+  expect(projectAnalysisError(composed).details).not.toHaveProperty(
+    "partial_observation",
+  );
 });

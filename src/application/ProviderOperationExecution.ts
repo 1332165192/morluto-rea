@@ -97,20 +97,31 @@ export const completeProviderEvidence = (
 
 /**
  * Retain an incomplete observation when projection can serialize it.
- * A partial that is not JSON is cleared and recorded as a secondary
- * output failure, leaving cancellation or timeout as the owner error.
+ * A partial that is not JSON is cleared from the returned error and from
+ * every cleanup primary projection can select later. Each cleared error
+ * records an output failure, leaving cancellation or timeout primary.
  */
 export const keepIncompleteObservation = (
   error: AnalysisError,
   operation: string,
   reason: string,
 ): AnalysisError => {
-  const partial = error.partialObservation;
-  // Validate without cloning. Projection serializes a kept partial later.
-  if (partial === undefined || jsonValueValidationIssue(partial) === undefined)
-    return error;
-  error.partialObservation = undefined;
-  return error.retainSecondaryFailure(
-    new AnalysisOutputError(operation, reason),
-  );
+  const seen = new Set<AnalysisError>();
+  let current: AnalysisError | undefined = error;
+  while (current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    const partial = current.partialObservation;
+    // Validate without cloning. Projection serializes a kept partial later.
+    if (
+      partial !== undefined &&
+      jsonValueValidationIssue(partial) !== undefined
+    ) {
+      current.partialObservation = undefined;
+      current.retainSecondaryFailure(
+        new AnalysisOutputError(operation, reason),
+      );
+    }
+    current = current.cleanupPrimary;
+  }
+  return error;
 };
