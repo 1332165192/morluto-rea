@@ -18,6 +18,10 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { AnalysisCleanupLeaseGroup } from "../artifacts/AnalysisCleanupLease.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { cleanupOwnedProcessGroup } from "../process/ProcessOwnership.js";
+import {
+  createLinuxDemoCleanup,
+  LINUX_DEMO_ORDERLY_SHUTDOWN_GRACE_MS,
+} from "./LinuxDemoCleanup.js";
 import { execFileOutput } from "../process/ExecFileOutput.js";
 import {
   type ProviderProcessLaunch,
@@ -147,6 +151,7 @@ export interface HopperApplicationLauncherDependencies {
     readonly helperPath: string;
     readonly signal?: AbortSignal;
   }) => Promise<LinuxPrivateDisplaySelection>;
+  readonly demoOrderlyShutdownGraceMs?: number;
 }
 
 /**
@@ -385,7 +390,15 @@ export class HopperApplicationLauncher implements BridgeLauncher {
       });
       if (started === null) return err(new HopperCancelledError());
       launched = true;
-      const cleanup = () => cleanupOwnedProcessGroup(started.ownership);
+      const cleanup =
+        linuxDemo === undefined
+          ? () => cleanupOwnedProcessGroup(started.ownership)
+          : createLinuxDemoCleanup(
+              started.process,
+              started.ownership,
+              this.dependencies.demoOrderlyShutdownGraceMs ??
+                LINUX_DEMO_ORDERLY_SHUTDOWN_GRACE_MS,
+            );
       const ownedLauncher = {
         ...(this.options.preparedImage === undefined
           ? {}

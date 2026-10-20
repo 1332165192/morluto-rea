@@ -66,6 +66,94 @@ const options = (launcherPath: string): HopperApplicationLauncherOptions => ({
   demoHelperPath: "/rea/hopper-demo-x11.py",
 });
 
+const launchFixtureProcess = async (
+  launcher: HopperApplicationLauncher,
+  directory: string,
+) => {
+  const result = await launcher.launch({
+    directory,
+    socketPath: join(directory, "bridge.sock"),
+    token: "fixture-token",
+    runId: randomUUID(),
+  });
+  if (!result.ok) throw result.error;
+  return {
+    launched: result.value,
+    supervisor: new ProviderProcessSupervisor(result.value),
+  };
+};
+
+const verifyFixtureLinuxLauncher = async () =>
+  ok({
+    sha256: verifiedSha256,
+    version: "fixture",
+    primaryFingerprint: "0".repeat(40),
+    signingFingerprint: "1".repeat(40),
+    source: "signed_package_cache" as const,
+  });
+
+const releaseFixtureProcess = async (
+  supervisor: ProviderProcessSupervisor,
+  launched: Awaited<ReturnType<typeof launchFixtureProcess>>["launched"],
+) => {
+  await supervisor.stop();
+  await launched.releaseLease?.();
+};
+
+const stopWithinFixtureDeadline = async (
+  supervisor: ProviderProcessSupervisor,
+) => {
+  const started = Date.now();
+  expect(await supervisor.stop()).toMatchObject({ status: "verified-cleanup" });
+  expect(Date.now() - started).toBeLessThan(5_000);
+};
+
+type OrderlyHelperMode = "orderly" | "ignore-shutdown" | "signal-death";
+
+const orderlyHelperLauncher = (directory: string, mode: OrderlyHelperMode) =>
+  new HopperApplicationLauncher(
+    {
+      ...options(process.execPath),
+      launchMode: "verified_linux_demo",
+      environment: {
+        REA_FIXTURE_LOCK_DIR: directory,
+        ...(mode === "ignore-shutdown"
+          ? { REA_FIXTURE_IGNORE_SHUTDOWN: "1" }
+          : {}),
+        ...(mode === "signal-death" ? { REA_FIXTURE_SIGNAL_DEATH: "1" } : {}),
+      },
+      demoHelperPath: fileURLToPath(
+        new URL("../../../fixtures/hopperOrderlyShutdown.py", import.meta.url),
+      ),
+    },
+    {
+      verifyLinuxLauncher: verifyFixtureLinuxLauncher,
+      selectPrivateDisplay: readyDirectDisplay,
+      ...(mode === "ignore-shutdown"
+        ? { demoOrderlyShutdownGraceMs: 500 }
+        : {}),
+    },
+  );
+
+const waitForFixtureFile = async (path: string, missingMessage: string) => {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      await access(path);
+      return;
+    } catch (cause) {
+      if (
+        !(cause instanceof Error) ||
+        !("code" in cause) ||
+        cause.code !== "ENOENT"
+      )
+        throw cause;
+      if (Date.now() >= deadline) throw new Error(missingMessage);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+};
+
 it("resolves mixed image and publisher cleanup only after each owner releases", async () => {
   const directory = await createTestTempDirectory("rea-hopper-mixed-cleanup-");
   const targetPath = join(directory, "target.macho");
@@ -436,14 +524,10 @@ it("launches Hopper helpers with the caller-selected environment without restori
     bridgeScriptPath: "/rea/unused-bridge.py",
     launchMode: "native",
   });
-  const launched = await launcher.launch({
+  const { launched, supervisor } = await launchFixtureProcess(
+    launcher,
     directory,
-    socketPath: join(directory, "bridge.sock"),
-    token: "fixture-token",
-    runId: randomUUID(),
-  });
-  if (!launched.ok) throw launched.error;
-  const supervisor = new ProviderProcessSupervisor(launched.value);
+  );
   try {
     expect(await supervisor.waitForOutputClose(5_000)).toBe(true);
     expect(JSON.parse(supervisor.snapshot().stdout.text)).toEqual({
@@ -455,7 +539,7 @@ it("launches Hopper helpers with the caller-selected environment without restori
     });
   } finally {
     await supervisor.stop();
-    await launched.value.releaseLease?.();
+    await launched.releaseLease?.();
   }
 });
 
@@ -473,26 +557,15 @@ it.skipIf(process.platform !== "linux")(
         ),
       },
       {
-        verifyLinuxLauncher: async () =>
-          ok({
-            sha256: verifiedSha256,
-            version: "fixture",
-            primaryFingerprint: "0".repeat(40),
-            signingFingerprint: "1".repeat(40),
-            source: "signed_package_cache",
-          }),
+        verifyLinuxLauncher: verifyFixtureLinuxLauncher,
         selectPrivateDisplay,
       },
     );
-    const launched = await launcher.launch({
+    const { launched, supervisor } = await launchFixtureProcess(
+      launcher,
       directory,
-      socketPath: join(directory, "bridge.sock"),
-      token: "fixture-token",
-      runId: randomUUID(),
-    });
-    if (!launched.ok) throw launched.error;
+    );
     expect(selectPrivateDisplay).toHaveBeenCalledOnce();
-    const supervisor = new ProviderProcessSupervisor(launched.value);
     try {
       expect(await supervisor.waitForOutputClose(5_000)).toBe(true);
       expect(supervisor.snapshot().exitCode).toBe(0);
@@ -500,8 +573,7 @@ it.skipIf(process.platform !== "linux")(
         owner_alive: true,
       });
     } finally {
-      await supervisor.stop();
-      await launched.value.releaseLease?.();
+      await releaseFixtureProcess(supervisor, launched);
     }
   },
 );
@@ -545,5 +617,90 @@ it.skipIf(process.platform !== "linux")(
     expect(projected.details).not.toHaveProperty("exit_code");
     expect(projected.details).not.toHaveProperty("launcher");
     expect(selectPrivateDisplay).not.toHaveBeenCalled();
+  },
+);
+
+it.skipIf(process.platform !== "linux")(
+  "asks the demo helper to shut down orderly so its X lock is removed",
+  async () => {
+    const directory = await createTestTempDirectory("rea-hopper-orderly-");
+    const lockPath = join(directory, ".X199-lock");
+    const markerPath = join(directory, "orderly-shutdown");
+    const launcher = orderlyHelperLauncher(directory, "orderly");
+    const { launched, supervisor } = await launchFixtureProcess(
+      launcher,
+      directory,
+    );
+    try {
+      await waitForFixtureFile(lockPath, "lock file never appeared");
+      expect(await supervisor.stop()).toMatchObject({
+        status: "verified-cleanup",
+      });
+      // The helper shut down orderly: it removed its own lock before exiting.
+      await expect(access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(markerPath)).resolves.toBeUndefined();
+    } finally {
+      await releaseFixtureProcess(supervisor, launched);
+    }
+  },
+);
+
+it.skipIf(process.platform !== "linux")(
+  "still cleans up when the demo helper ignores the orderly shutdown request",
+  async () => {
+    const directory = await createTestTempDirectory(
+      "rea-hopper-orderly-ignored-",
+    );
+    const lockPath = join(directory, ".X199-lock");
+    const launcher = orderlyHelperLauncher(directory, "ignore-shutdown");
+    const { launched, supervisor } = await launchFixtureProcess(
+      launcher,
+      directory,
+    );
+    try {
+      // The fixture really started: its lock is on disk before we ask it to
+      // shut down, so an early fixture failure cannot fake a passing test.
+      await waitForFixtureFile(lockPath, "lock file never appeared");
+      await stopWithinFixtureDeadline(supervisor);
+      // Bounded by the configured 500 ms grace, not a hardcoded 10 s wait:
+      // the group kill must follow the ignored shutdown request promptly.
+      // The fallback path ran: the helper was reaped by the group SIGKILL,
+      // and its lock survives because the orderly path never ran.
+      expect(launched.process.signalCode).toBe("SIGKILL");
+      await expect(access(lockPath)).resolves.toBeUndefined();
+    } finally {
+      await releaseFixtureProcess(supervisor, launched);
+    }
+  },
+);
+
+it.skipIf(process.platform !== "linux")(
+  "does not wait out the orderly grace when the demo helper already died from a signal",
+  async () => {
+    const directory = await createTestTempDirectory("rea-hopper-signal-dead-");
+    const lockPath = join(directory, ".X199-lock");
+    const launcher = orderlyHelperLauncher(directory, "signal-death");
+    const { launched, supervisor } = await launchFixtureProcess(
+      launcher,
+      directory,
+    );
+    try {
+      // The fixture wrote its lock, then killed itself with SIGKILL before
+      // the launcher asked for cleanup.
+      await waitForFixtureFile(lockPath, "lock file never appeared");
+      const exitDeadline = Date.now() + 5_000;
+      for (;;) {
+        if (launched.process.signalCode !== null) break;
+        if (Date.now() >= exitDeadline)
+          throw new Error("signal exit never observed");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await stopWithinFixtureDeadline(supervisor);
+      // No grace wait: the helper was already gone, so cleanup must not sit
+      // out the 10 s orderly shutdown window.
+      expect(launched.process.signalCode).toBe("SIGKILL");
+    } finally {
+      await releaseFixtureProcess(supervisor, launched);
+    }
   },
 );
