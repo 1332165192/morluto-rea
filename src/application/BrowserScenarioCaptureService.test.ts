@@ -4,7 +4,6 @@ import {
   AnalysisCancelledError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { parseEvidence } from "../domain/evidence.js";
 import { browserScenarioInputSchema } from "../domain/browserScenario.js";
@@ -16,6 +15,11 @@ import { err, ok } from "../domain/result.js";
 import { scriptScenarioFixture } from "../../tests/fixtures/webScriptCapture.js";
 import type { BrowserScenarioCapturePort } from "./BrowserScenarioCapturePort.js";
 import { captureBrowserScenario } from "./BrowserScenarioCaptureService.js";
+import {
+  expectDroppedPartial,
+  expectKeptPartial,
+  expectOwnerError,
+} from "./ownerObservationExpectation.js";
 
 const scenario = browserScenarioInputSchema.parse({
   browser: { mode: "launch", executable_path: "/fixture/chrome" },
@@ -138,16 +142,7 @@ it("keeps startup cancellation and its incomplete capture", async () => {
     captureScenario: async () => err(failure),
   };
   const result = await captureBrowserScenario(provider, scenario);
-  expect(result.ok).toBe(false);
-  if (result.ok) throw new Error("Expected cancellation");
-  expect(result.error).toBe(failure);
-  expect(result.error.cause).toBe(reason);
-  expect(result.error.partialObservation).toBe(partial);
-  expect(result.error.secondaryFailures).toHaveLength(0);
-  expect(projectAnalysisError(result.error)).toMatchObject({
-    code: "cancelled",
-    details: { partial_observation: partial },
-  });
+  expectKeptPartial(expectOwnerError(result, failure, reason), partial);
 });
 
 it.each([{ steps: [undefined] }, { started_at: Number.NaN }])(
@@ -167,22 +162,10 @@ it.each([{ steps: [undefined] }, { started_at: Number.NaN }])(
       captureScenario: async () => err(failure),
     };
     const result = await captureBrowserScenario(provider, scenario);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("Expected cancellation");
-    expect(result.error).toBe(failure);
-    expect(result.error.cause).toBe(reason);
-    expect(result.error.partialObservation).toBeUndefined();
-    expect(result.error.secondaryFailures).toMatchObject([
-      {
-        _tag: "AnalysisOutputError",
-        operation: "capture_browser_scenario",
-        reason:
-          "Browser scenario provider retained a non-JSON incomplete observation.",
-      },
-    ]);
-    expect(projectAnalysisError(result.error)).toMatchObject({
-      code: "cancelled",
-    });
+    expectDroppedPartial(
+      expectOwnerError(result, failure, reason),
+      "Browser scenario provider retained a non-JSON incomplete observation.",
+    );
   },
 );
 

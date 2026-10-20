@@ -5,7 +5,6 @@ import {
   AnalysisCancelledError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
-import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { err, ok } from "../../domain/result.js";
 import { parseEvidence } from "../../domain/evidence.js";
 import type { JavaScriptRuntimeTargetList } from "../../domain/javascript/javascriptRuntimeObservation.js";
@@ -15,6 +14,11 @@ import {
   listJavaScriptRuntimeTargets,
   observeJavaScriptRuntime,
 } from "./JavaScriptRuntimeObservationService.js";
+import {
+  expectDroppedPartial,
+  expectKeptPartial,
+  expectOwnerError,
+} from "../ownerObservationExpectation.js";
 
 it("preserves failed Inspector cleanup when cancellation occurs during observation", async () => {
   const controller = new AbortController();
@@ -337,16 +341,7 @@ it("keeps cancellation when the retained runtime observation is incomplete", asy
     target_id: "target",
     observation_ms: 0,
   });
-  expect(result.ok).toBe(false);
-  if (result.ok) throw new Error("Expected cancellation");
-  expect(result.error).toBe(failure);
-  expect(result.error.cause).toBe(reason);
-  expect(result.error.partialObservation).toBe(partial);
-  expect(result.error.secondaryFailures).toHaveLength(0);
-  expect(projectAnalysisError(result.error)).toMatchObject({
-    code: "cancelled",
-    details: { partial_observation: partial },
-  });
+  expectKeptPartial(expectOwnerError(result, failure, reason), partial);
 });
 
 it.each([{ scripts: [undefined] }, { elapsed_ms: Number.NaN }])(
@@ -368,20 +363,9 @@ it.each([{ scripts: [undefined] }, { elapsed_ms: Number.NaN }])(
       target_id: "target",
       observation_ms: 0,
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("Expected cancellation");
-    expect(result.error).toBe(failure);
-    expect(result.error.cause).toBe(reason);
-    expect(result.error.partialObservation).toBeUndefined();
-    expect(result.error.secondaryFailures).toMatchObject([
-      {
-        _tag: "AnalysisOutputError",
-        operation: "observe_javascript_runtime",
-        reason: "Inspector retained a non-JSON incomplete observation.",
-      },
-    ]);
-    expect(projectAnalysisError(result.error)).toMatchObject({
-      code: "cancelled",
-    });
+    expectDroppedPartial(
+      expectOwnerError(result, failure, reason),
+      "Inspector retained a non-JSON incomplete observation.",
+    );
   },
 );

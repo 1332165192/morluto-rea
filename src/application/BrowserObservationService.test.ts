@@ -8,6 +8,11 @@ import {
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import {
+  expectDroppedPartial,
+  expectKeptPartial,
+  expectOwnerError,
+} from "./ownerObservationExpectation.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { err, ok } from "../domain/result.js";
 import { passiveNetworkCapture } from "../../tests/fixtures/passiveNetworkCapture.js";
@@ -243,16 +248,7 @@ it("keeps page cancellation when the retained inspection is incomplete", async (
     include_script_sources: false,
   });
   const result = await inspectWebPage(browser, pageInput);
-  expect(result.ok).toBe(false);
-  if (result.ok) throw new Error("Expected cancellation");
-  expect(result.error).toBe(failure);
-  expect(result.error.cause).toBe(reason);
-  expect(result.error.partialObservation).toBe(partial);
-  expect(result.error.secondaryFailures).toHaveLength(0);
-  expect(projectAnalysisError(result.error)).toMatchObject({
-    code: "cancelled",
-    details: { partial_observation: partial },
-  });
+  expectKeptPartial(expectOwnerError(result, failure, reason), partial);
 });
 
 it("keeps bundle cancellation and an earlier failure when retained facts are incomplete", async () => {
@@ -278,16 +274,13 @@ it("keeps bundle cancellation and an earlier failure when retained facts are inc
       analyzeBundle: async () => err(failure),
     } as unknown as BrowserObservationPort;
     const result = await analyzeWebBundle(browser, selected);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("Expected the owner failure");
-    expect(result.error).toBe(failure);
-    expect(result.error.partialObservation).toBe(partial);
-    expect(result.error.secondaryFailures).toHaveLength(0);
+    expectKeptPartial(
+      expectOwnerError(result, failure, failure.cause),
+      partial,
+      failure === timedOut ? "provider_timeout" : "cancelled",
+    );
   }
-  expect(projectAnalysisError(cancelled)).toMatchObject({
-    code: "cancelled",
-    details: { partial_observation: partial },
-  });
+  expect(projectAnalysisError(cancelled).code).toBe("cancelled");
 });
 
 const pageInput = () =>
@@ -347,22 +340,12 @@ it.each([
       operation === "inspect_web_page"
         ? await inspectWebPage(browserReturning(failure), pageInput())
         : await analyzeWebBundle(browserReturning(failure), bundleInput());
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("Expected cancellation");
-    expect(result.error).toBe(failure);
-    expect(result.error.cause).toBe(reason);
-    expect(result.error.partialObservation).toBeUndefined();
-    expect(result.error.secondaryFailures).toMatchObject([
-      {
-        _tag: "AnalysisOutputError",
-        operation,
-        reason: "Browser provider retained a non-JSON incomplete observation.",
-      },
-    ]);
-    expect(projectAnalysisError(result.error)).toMatchObject({
-      code: "cancelled",
-    });
-    expect(projectAnalysisError(result.error).details).not.toHaveProperty(
+    const error = expectOwnerError(result, failure, reason);
+    expectDroppedPartial(
+      error,
+      "Browser provider retained a non-JSON incomplete observation.",
+    );
+    expect(projectAnalysisError(error).details).not.toHaveProperty(
       "partial_observation",
     );
   },
@@ -387,17 +370,16 @@ it.each([
     const failure = new BrowserObservationError("inspect_web_page", "timeout", {
       partialObservation: partial as never,
     });
-    const result = await inspectWebPage(browserReturning(failure), pageInput());
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("Expected timeout");
-    expect(result.error).toBe(failure);
-    expect(result.error.partialObservation).toBeUndefined();
-    expect(result.error.secondaryFailures[0]).toBeInstanceOf(
-      AnalysisOutputError,
+    const error = expectOwnerError(
+      await inspectWebPage(browserReturning(failure), pageInput()),
+      failure,
+      undefined,
     );
-    expect(projectAnalysisError(result.error)).toMatchObject({
-      code: "provider_timeout",
-      category: "timeout",
-    });
+    expectDroppedPartial(
+      error,
+      "Browser provider retained a non-JSON incomplete observation.",
+      "provider_timeout",
+    );
+    expect(projectAnalysisError(error).category).toBe("timeout");
   },
 );
