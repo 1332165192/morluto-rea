@@ -73,7 +73,10 @@ const indexIpcFinding = (
 };
 
 interface PathContext {
-  readonly entryNode: t.Node;
+  // The syntax invocation whose literal arguments seeded this walk. A bridge
+  // member is called with unknown public arguments, so its exposure supplies
+  // none; the first literal-argument call inside the member becomes the seed.
+  readonly entryNode: t.Node | undefined;
   readonly entry: string;
   readonly entryPath?: readonly string[];
   readonly entryKind: ElectronCallPath["entry_kind"] | null;
@@ -337,6 +340,7 @@ export const collectElectronWrappedCallPaths = (
     const channel = first.value;
     const location = range(node);
     const invocationLocation =
+      context.entryNode === undefined ||
       JSON.stringify(range(context.entryNode)) === JSON.stringify(location)
         ? undefined
         : range(context.entryNode);
@@ -408,7 +412,7 @@ export const collectElectronWrappedCallPaths = (
             endpoint,
             channel,
             location,
-            range(context.entryNode),
+            context.entryNode === undefined ? null : range(context.entryNode),
             context.entryKind,
             context.entry,
             context.entryPath,
@@ -560,7 +564,7 @@ export const collectElectronWrappedCallPaths = (
         ),
         {
           ...memberContext,
-          entryNode: node,
+          entryNode: undefined,
           entryKind: "bridge-member",
           entry,
           entryPath: [key.value, ...path],
@@ -589,6 +593,9 @@ export const collectElectronWrappedCallPaths = (
           args,
           {
             ...branchContext,
+            entryNode:
+              branchContext.entryNode ??
+              (t.isStringLiteral(node.arguments[0]) ? node : undefined),
             steps: [
               ...branchContext.steps,
               step(node, "call", callLabel(node.callee)),

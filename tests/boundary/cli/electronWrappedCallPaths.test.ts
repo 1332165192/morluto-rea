@@ -785,3 +785,79 @@ cliTest(
     }
   },
 );
+
+cliTest(
+  "counts one exposed renderer listener once through analysis and tracing",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory(
+      "rea-electron-exposed-listener-",
+    );
+    await writeFixtureFiles(root, {
+      "package.json": '{"name":"ipc-probe","version":"1.0.0","main":"main.js"}',
+      "main.js": `const { app, BrowserWindow, ipcMain } = require("electron");
+        function createWindow() {
+          const window = new BrowserWindow({ webPreferences: { preload: "./preload.js" } });
+          window.loadFile("index.html");
+        }
+        ipcMain.handle("ping", () => "pong");
+        app.whenReady().then(createWindow);`,
+      "preload.js": `const { contextBridge, ipcRenderer } = require("electron");
+        contextBridge.exposeInMainWorld("api", {
+          ping: () => ipcRenderer.invoke("ping"),
+          onPong: (callback) => ipcRenderer.on("pong", callback),
+        });`,
+      "index.html": "<!doctype html><html><body></body></html>",
+    });
+    const output = await cli.run({
+      arguments: ["analyze-javascript-application", root, "--json"],
+    });
+    expect(output.exitCode, output.stderr).toBe(0);
+    const { normalized_result: result } = z
+      .object({ normalized_result: javascriptApplicationAnalysisResultSchema })
+      .parse(output.json);
+    expect(result.summary.ipc).toMatchObject({
+      operations: 3,
+      renderer_listeners: 1,
+    });
+    const pong = result.graph.nodes.filter(
+      (node) =>
+        node.kind === "ipc-channel" &&
+        node.observations.some(
+          (observation) => observation.properties.channel === "pong",
+        ),
+    );
+    expect(pong).toHaveLength(1);
+    expect(pong[0]?.observations).toHaveLength(1);
+    expect(pong[0]?.observations[0]?.evidence.state).toBe("observed");
+    expect(result.graph.nodes).toContainEqual(
+      expect.objectContaining({
+        kind: "context-bridge-api",
+        observations: [
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              members: ["onPong", "ping"],
+            }),
+          }),
+        ],
+      }),
+    );
+    const input = join(root, "trace-input.json");
+    await writeFile(
+      input,
+      JSON.stringify({
+        application: output.json,
+        seed: { kind: "channel", value: "pong" },
+        direction: "incoming",
+      }),
+    );
+    const traced = await cli.run({
+      arguments: ["trace-application-feature", input, "--json"],
+    });
+    expect(traced.exitCode, traced.stderr).toBe(0);
+    const { normalized_result: trace } = z
+      .object({ normalized_result: applicationFeatureTraceResultSchema })
+      .parse(traced.json);
+    expect(trace.summary.matched_seeds).toBe(1);
+    expect(trace.seed_matches).toHaveLength(1);
+  },
+);

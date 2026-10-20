@@ -384,6 +384,29 @@ it("keeps a directly observed renderer operation singular when tracing its expos
     expect.objectContaining({ entry: "desktop.ping", channel: "ping" }),
   );
 });
+it("keeps an exposed renderer listener singular and seeds its wrapper call", () => {
+  const direct = analyzeJavaScriptStaticSource(`
+    const {contextBridge,ipcRenderer}=require("electron");
+    contextBridge.exposeInMainWorld("desktop",{onPong:callback=>ipcRenderer.on("pong",callback)});
+  `);
+  expect(direct.electron.ipc).toEqual([
+    expect.objectContaining({ channel: "pong", operation: "on" }),
+  ]);
+  expect(direct.electron.ipc[0]).not.toHaveProperty("resolution_basis");
+  const wrapped = analyzeJavaScriptStaticSource(`
+    const {contextBridge,ipcRenderer}=require("electron");
+    const listen=(channel,callback)=>ipcRenderer.on(channel,callback);
+    contextBridge.exposeInMainWorld("desktop",{onPong:callback=>listen("pong",callback)});
+  `);
+  const resolved = wrapped.electron.ipc.filter(
+    ({ channel }) => channel === "pong",
+  );
+  expect(resolved).toHaveLength(1);
+  expect(resolved[0]).toMatchObject({
+    resolution_basis: "wrapper-substitution",
+    invocation_location: { start: { line: 4 } },
+  });
+});
 it("does not identify overwritten Electron namespaces or shadowed require", () => {
   for (const source of [
     `const e=require("electron");e.ipcMain={on(){}};e.ipcMain.on("bad",event=>event.sender.copy());`,
