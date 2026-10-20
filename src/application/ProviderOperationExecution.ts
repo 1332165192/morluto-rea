@@ -9,7 +9,14 @@ import {
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import type { Evidence } from "../domain/evidence.js";
-import { jsonValueValidationIssue } from "../domain/jsonValue.js";
+import {
+  freezeJsonSnapshot,
+  isImmutableJsonSnapshot,
+} from "../domain/immutableJson.js";
+import {
+  jsonValueSchema,
+  jsonValueValidationIssue,
+} from "../domain/jsonValue.js";
 import { projectInputIssues } from "../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
@@ -97,6 +104,8 @@ export const completeProviderEvidence = (
 
 /**
  * Retain an incomplete observation when projection can serialize it.
+ * A JSON partial is replaced by one frozen snapshot, so a later mutation
+ * cannot make projection throw and projection does not copy it again.
  * A partial that is not JSON is cleared from the returned error and from
  * every cleanup primary projection can select later. Each cleared error
  * records an output failure, leaving cancellation or timeout primary.
@@ -111,15 +120,18 @@ export const keepIncompleteObservation = (
   while (current !== undefined && !seen.has(current)) {
     seen.add(current);
     const partial = current.partialObservation;
-    // Validate without cloning. Projection serializes a kept partial later.
-    if (
-      partial !== undefined &&
-      jsonValueValidationIssue(partial) !== undefined
-    ) {
-      current.partialObservation = undefined;
-      current.retainSecondaryFailure(
-        new AnalysisOutputError(operation, reason),
-      );
+    if (partial !== undefined && !isImmutableJsonSnapshot(partial)) {
+      // Validate without cloning. Copy only a partial that projection keeps.
+      if (jsonValueValidationIssue(partial) === undefined) {
+        current.partialObservation = freezeJsonSnapshot(
+          jsonValueSchema.parse(partial),
+        ) as typeof partial;
+      } else {
+        current.partialObservation = undefined;
+        current.retainSecondaryFailure(
+          new AnalysisOutputError(operation, reason),
+        );
+      }
     }
     current = current.cleanupPrimary;
   }

@@ -136,3 +136,25 @@ it("clears a non-JSON partial from the cleanup primary projection returns after 
     "partial_observation",
   );
 });
+
+it("freezes a retained partial so a later mutation cannot break projection", () => {
+  const partial = { steps: [] as unknown[] };
+  const primary = new AnalysisCancelledError("capture_browser_scenario", {
+    cause: { requested: "stop during capture" },
+    partialObservation: partial as never,
+  });
+  keepIncompleteObservation(
+    primary,
+    "capture_browser_scenario",
+    "unused because the partial is JSON",
+  );
+  partial.steps.push(undefined);
+
+  expect(primary.partialObservation).toEqual({ steps: [] });
+  expect(Object.isFrozen(primary.partialObservation)).toBe(true);
+  expect(primary.secondaryFailures).toHaveLength(0);
+  expect(projectAnalysisError(primary)).toMatchObject({
+    code: "cancelled",
+    details: { partial_observation: { steps: [] } },
+  });
+});

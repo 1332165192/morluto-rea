@@ -22,7 +22,7 @@ export const expectKeptPartial = (
   partial: unknown,
   code: "cancelled" | "provider_timeout" = "cancelled",
 ): void => {
-  expect(error.partialObservation).toBe(partial);
+  expect(error.partialObservation).toEqual(partial);
   expect(error.secondaryFailures).toHaveLength(0);
   expect(projectAnalysisError(error)).toMatchObject({
     code,
