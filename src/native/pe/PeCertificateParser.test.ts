@@ -9,6 +9,8 @@ import {
 } from "./PeCertificates.fixture.js";
 import {
   DER_NODE_BUDGET,
+  MAX_OID_ARC_BYTES,
+  MAX_OID_BYTES,
   decodeOid,
   parseCertificate,
   PeCertificateDerFailure,
@@ -172,6 +174,20 @@ it("decodes OBJECT IDENTIFIER arcs without truncation", () => {
     "2.25.4294967296",
   );
   expect(decodeOid(Buffer.from([0x2a, 0x86, 0x48]))).toBe("1.2.840");
+});
+
+it("rejects an oversized OBJECT IDENTIFIER before growing an arc", () => {
+  const oid = Buffer.alloc(MAX_OID_BYTES + 1, 0xff);
+  oid[oid.length - 1] = 0x7f;
+  const payload = derSeq(der(0x06, oid), der(0xa0, derSeq(derInt(1))));
+  expect(() => parse(peCertificateFixture(false, payload))).toThrow(
+    /OBJECT IDENTIFIER exceeds/u,
+  );
+  const arc = Buffer.alloc(MAX_OID_ARC_BYTES + 1, 0x80);
+  arc[arc.length - 1] = 0x00;
+  expect(() => decodeOid(Buffer.concat([Buffer.from([0x2a]), arc]))).toThrow(
+    /arc exceeds/u,
+  );
 });
 
 it("decodes UniversalString names as UTF-32BE", () => {
