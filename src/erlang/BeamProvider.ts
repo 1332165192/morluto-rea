@@ -21,6 +21,7 @@ import {
   MAX_INSPECT_ERLANG_BEAM_ATOMS,
   MAX_INSPECT_ERLANG_BEAM_CHUNKS,
   MAX_INSPECT_ERLANG_BEAM_FILE_BYTES,
+  MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS,
   type InspectErlangBeamInput,
 } from "../domain/erlang/beam.js";
 import { err, ok } from "../domain/result.js";
@@ -102,6 +103,8 @@ const inputBudgetRemediation = (
     return input.max_atoms >= MAX_INSPECT_ERLANG_BEAM_ATOMS
       ? `The file exceeds the ${String(MAX_INSPECT_ERLANG_BEAM_ATOMS)}-atom ceiling this operation accepts; select a smaller artifact.`
       : `Raise max_atoms above ${String(input.max_atoms)} or select a smaller artifact; the limit is the caller-selected atom budget.`;
+  if (message.includes("row budget"))
+    return `The file exceeds the ${String(MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS)}-row ceiling this operation accepts; select a smaller artifact.`;
   return input.max_chunks >= MAX_INSPECT_ERLANG_BEAM_CHUNKS
     ? `The file exceeds the ${String(MAX_INSPECT_ERLANG_BEAM_CHUNKS)}-chunk ceiling this operation accepts; select a smaller artifact.`
     : `Raise max_chunks above ${String(input.max_chunks)} or select a smaller artifact; the limit is the caller-selected chunk budget.`;

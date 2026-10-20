@@ -1,8 +1,10 @@
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
-import type {
-  ErlangBeam,
-  InspectErlangBeamInput,
+import {
+  MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS,
+  type ErlangBeam,
+  type InspectErlangBeamInput,
 } from "../domain/erlang/beam.js";
 
 const fail = (message: string): never => {
@@ -48,13 +50,32 @@ const atomAt = (
   return atoms[index - 1]?.name ?? null;
 };
 
+/** Reads an atom length: one byte, or OTP 28+ compact `u` tag when compact. */
+const atomLength = (
+  payload: Buffer,
+  at: number,
+  compact: boolean,
+): [length: number, next: number] => {
+  if (at >= payload.length) fail("BEAM atom table is truncated.");
+  const first = payload[at]!;
+  if (!compact) return [first, at + 1];
+  if ((first & 0x07) !== 0) fail("BEAM atom length is not a u tag.");
+  if ((first & 0x08) === 0) return [first >> 4, at + 1];
+  if ((first & 0x10) !== 0) fail("BEAM atom length encoding is unsupported.");
+  if (at + 1 >= payload.length) fail("BEAM atom table is truncated.");
+  return [((first & 0xe0) << 3) | payload[at + 1]!, at + 2];
+};
+
 const parseAtoms = (
   payload: Buffer,
   maxAtoms: number,
   encoding: "latin1" | "utf8",
 ): ErlangBeam["atoms"] => {
   if (payload.length < 4) fail("BEAM atom table is truncated.");
-  const count = u32(payload, 0);
+  // OTP 28+ writes a negated count and compact-encoded name lengths.
+  const declared = payload.readInt32BE(0);
+  const compact = declared < 0;
+  const count = Math.abs(declared);
   if (count > maxAtoms)
     throw new ArtifactReaderFailure(
       "limit",
@@ -64,13 +85,15 @@ const parseAtoms = (
   const atoms: NonNullable<ErlangBeam["atoms"]> = [];
   let at = 4;
   for (let index = 1; index <= count; index += 1) {
-    if (at >= payload.length) fail("BEAM atom table is truncated.");
-    const length = payload[at]!;
-    at += 1;
+    const [length, next] = atomLength(payload, at, compact);
+    at = next;
     requireRange(payload, at, length);
+    const nameBytes = payload.subarray(at, at + length);
+    if (encoding === "utf8" && !isUtf8(nameBytes))
+      fail("BEAM atom name is not valid UTF-8.");
     atoms.push({
       index,
-      name: payload.subarray(at, at + length).toString(encoding),
+      name: nameBytes.toString(encoding),
     });
     at += length;
   }
@@ -144,11 +167,7 @@ export const parseErlangBeam = (
   const payloads = new Map<string, { payload: Buffer; offset: number }>();
   let at = 12;
   while (at < formEnd) {
-    if (formEnd - at < 8) {
-      if (bytes.subarray(at, formEnd).some((byte) => byte !== 0))
-        fail("BEAM chunk header is truncated.");
-      break;
-    }
+    if (formEnd - at < 8) fail("BEAM chunk header is truncated.");
     if (chunks.length >= input.max_chunks)
       throw new ArtifactReaderFailure(
         "limit",
@@ -188,6 +207,21 @@ export const parseErlangBeam = (
     atomChunk === undefined || atomEncoding === null
       ? null
       : parseAtoms(atomChunk.payload, input.max_atoms, atomEncoding);
+  const declaredRows = (name: string): number => {
+    const payload = payloads.get(name)?.payload;
+    return payload !== undefined && payload.length >= 4 ? u32(payload, 0) : 0;
+  };
+  if (
+    declaredRows("ExpT") + declaredRows("ImpT") + declaredRows("FunT") >
+    MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS
+  )
+    throw new ArtifactReaderFailure(
+      "limit",
+      `BEAM tables exceed the ${String(
+        MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS,
+      )}-row budget.`,
+      { boundary: "capacity" },
+    );
   const exports =
     payloads.get("ExpT") === undefined
       ? null

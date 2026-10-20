@@ -12,6 +12,8 @@ export const MAX_INSPECT_ERLANG_BEAM_FILE_BYTES = 536870912;
 export const MAX_INSPECT_ERLANG_BEAM_CHUNKS = 256;
 /** Hard ceiling on decoded atom-table entries. */
 export const MAX_INSPECT_ERLANG_BEAM_ATOMS = 65536;
+/** Hard ceiling on export, import, and lambda rows combined. */
+export const MAX_INSPECT_ERLANG_BEAM_TABLE_ROWS = 65536;
 
 /** Complete bounded inspection of one Erlang BEAM IFF container. */
 export const inspectErlangBeamInputSchema = z.strictObject({

@@ -26,7 +26,8 @@ The inline Evidence result contains the artifact path, SHA-256, and byte length.
 `chunks` lists every IFF chunk name, file range, and payload SHA-256.
 
 When `AtU8` or `Atom` is present, `atoms` is the 1-based name table and
-`module` is atom 1. `exports`, `imports`, and `lambdas` resolve atom indices to
+`module` is atom 1. Both the pre-OTP 28 table and the OTP 28+ compact table
+(negated count, compact-encoded name lengths) are read. `exports`, `imports`, and `lambdas` resolve atom indices to
 those names when the table is present; unresolved indices keep `function` or
 `module` null.
 
@@ -37,8 +38,9 @@ tables are null, not empty-everywhere.
 ## Limits and failures
 
 The selected file is limited to 64 MiB by default (512 MiB maximum). At most
-64 chunks and 4096 atoms are examined by default. Malformed `FOR1`/`BEAM`
-headers and truncated chunks fail without partial success.
+64 chunks and 4096 atoms are examined by default, and at most 65536 export,
+import, and lambda rows together. Malformed `FOR1`/`BEAM` headers, truncated
+chunks, and `AtU8` names that are not valid UTF-8 fail without partial success.
 
 This workflow does not execute bytecode, inflate `LitT` literals, or decode
 `Attr`/`CInf` external-term payloads.

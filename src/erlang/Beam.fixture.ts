@@ -65,6 +65,17 @@ export const erlangBeamFixture = (module = "beam_fixture"): Buffer => {
   return concat(Buffer.from("FOR1", "latin1"), u32(form.length), form);
 };
 
+/** BEAM form that declares table counts and does not store row bodies. */
+export const erlangBeamDeclaredRowsFixture = (
+  counts: readonly (readonly [string, number])[],
+): Buffer => {
+  const chunks = concat(
+    ...counts.map(([name, count]) => chunk(name, u32(count))),
+  );
+  const form = concat(Buffer.from("BEAM", "latin1"), chunks);
+  return concat(Buffer.from("FOR1", "latin1"), u32(form.length), form);
+};
+
 /** BEAM form whose atom table exceeds a caller-selected atom budget. */
 export const erlangBeamManyAtomsFixture = (count: number): Buffer => {
   const names = Array.from(
@@ -75,3 +86,30 @@ export const erlangBeamManyAtomsFixture = (count: number): Buffer => {
   const form = concat(Buffer.from("BEAM", "latin1"), chunks);
   return concat(Buffer.from("FOR1", "latin1"), u32(form.length), form);
 };
+
+/**
+ * Compiler-produced BEAM: `erlc +deterministic` from Erlang/OTP 29 (compiler
+ * 10.0.2), which writes the OTP 28+ compact AtU8 layout. Source:
+ *
+ *     -module(rea_beam_fixture).
+ *     -export([hello/1]).
+ *     hello(Name) -> lists:reverse(Name).
+ */
+export const erlangBeamOtp29Fixture = (): Buffer =>
+  Buffer.from(
+    [
+      "Rk9SMQAAAixCRUFNQXRVOAAAAE3////5CBByZWFfYmVhbV9maXh0dXJlUGhlbGxv",
+      "UGxpc3RzcHJldmVyc2WwbW9kdWxlX2luZm9gZXJsYW5n8GdldF9tb2R1bGVfaW5m",
+      "bwAAAENvZGUAAABFAAAAEAAAAAAAAAC1AAAABwAAAAMBEJkQAhIiEAEgThAAATCZ",
+      "AAISUgABQEASA04QEAFQmQACElIQAWBAAxNAEgNOICADAAAAU3RyVAAAAABJbXBU",
+      "AAAAKAAAAAMAAAADAAAABAAAAAEAAAAGAAAABwAAAAEAAAAGAAAABwAAAAJFeHBU",
+      "AAAAKAAAAAMAAAAFAAAAAQAAAAYAAAAFAAAAAAAAAAQAAAACAAAAAQAAAAJNZXRh",
+      "AAAALYNsAAAAAWgCdxBlbmFibGVkX2ZlYXR1cmVzbAAAAAF3Cm1heWJlX2V4cHJq",
+      "agAAAExvY1QAAAAEAAAAAEF0dHIAAAAng2wAAAABaAJ3A3ZzbmwAAAABbhAAVsr2",
+      "2jNBkgUGfacAt0GWcGpqAENJbmYAAAAbg2wAAAABaAJ3B3ZlcnNpb25rAAYxMC4w",
+      "LjJqAERiZ2kAAABCg2gDdw1kZWJ1Z19pbmZvX3YxdxFlcmxfYWJzdHJhY3RfY29k",
+      "ZWgCdwRub25lbAAAAAF3DWRldGVybWluaXN0aWNqAABMaW5lAAAAFQAAAAAAAAAA",
+      "AAAAAwAAAAEAAAAAMQAAAFR5cGUAAAAKAAAABAAAAAEf/wAA",
+    ].join(""),
+    "base64",
+  );
