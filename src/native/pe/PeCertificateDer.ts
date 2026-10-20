@@ -108,19 +108,33 @@ export const readDer = (
 
 export const oidName = (oid: string): string | null => OID_NAMES[oid] ?? null;
 
+// One arc grows a BigInt by a shift per byte. Certificate OIDs, including a
+// 2.25 UUID arc, fit under both caps; the caps stop that growth.
+export const MAX_OID_BYTES = 256;
+export const MAX_OID_ARC_BYTES = 32;
+
 /** Decode an OBJECT IDENTIFIER content buffer as dotted decimal. */
 export const decodeOid = (content: Buffer): string => {
   if (content.length === 0) return fail("Empty OBJECT IDENTIFIER.");
+  if (content.length > MAX_OID_BYTES)
+    return fail(`OBJECT IDENTIFIER exceeds ${String(MAX_OID_BYTES)} bytes.`);
   // Arcs are unbounded base-128 integers; the first encoded value combines
   // the first two arcs and can itself span several bytes (2.999 -> 1079).
   const values: bigint[] = [];
   let value = 0n;
+  let arcBytes = 0;
   for (let index = 0; index < content.length; index += 1) {
+    arcBytes += 1;
+    if (arcBytes > MAX_OID_ARC_BYTES)
+      return fail(
+        `OBJECT IDENTIFIER arc exceeds ${String(MAX_OID_ARC_BYTES)} bytes.`,
+      );
     const byte = required(content[index], "Truncated OBJECT IDENTIFIER.");
     value = (value << 7n) | BigInt(byte & 0x7f);
     if ((byte & 0x80) === 0) {
       values.push(value);
       value = 0n;
+      arcBytes = 0;
     } else if (index === content.length - 1)
       return fail("Truncated OBJECT IDENTIFIER component.");
   }
