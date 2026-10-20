@@ -1193,3 +1193,44 @@ describe("malformed Objective-C protocol method lists", () => {
     });
   });
 });
+
+describe("Objective-C method lists cut by the record budget", () => {
+  it("never reports a declaration decoded while the budget omitted its methods", () => {
+    const complete = decodeAppleDispatchMetadata(fixture(), 100, provenance);
+    const classKey = (item: { name: string; is_meta_class: boolean | null }) =>
+      `${item.name}:${String(item.is_meta_class)}`;
+    const completeProtocols = new Map(
+      complete.objc_protocol_records.map((item) => [item.name, item]),
+    );
+    const completeClasses = new Map(
+      complete.objc_classes.map((item) => [classKey(item), item]),
+    );
+    const cutReasons = new Set<string>();
+    for (let budget = 1; budget < 40; budget++) {
+      const result = decodeAppleDispatchMetadata(fixture(), budget, provenance);
+      for (const record of result.objc_protocol_records) {
+        const full = completeProtocols.get(record.name);
+        if (record.decode.status === "decoded") {
+          expect(record.methods).toEqual(full?.methods);
+          expect(record.optional_methods).toEqual(full?.optional_methods);
+        } else if (record.decode.reason !== null)
+          cutReasons.add(`protocol:${record.decode.reason}`);
+      }
+      for (const record of result.objc_classes) {
+        const full = completeClasses.get(classKey(record));
+        if (record.decode?.status === "decoded")
+          expect(record.methods).toEqual(full?.methods);
+        else if (record.decode?.reason != null)
+          cutReasons.add(`class:${record.decode.reason}`);
+      }
+    }
+    // The fixture has methods on both declaration kinds, so some budget must
+    // admit each declaration but stop inside its method list.
+    expect([...cutReasons]).toEqual(
+      expect.arrayContaining([
+        "protocol:method_list_record_budget_exhausted",
+        "class:method_list_record_budget_exhausted",
+      ]),
+    );
+  });
+});

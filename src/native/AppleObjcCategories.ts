@@ -31,7 +31,7 @@ export const decodeObjcCategories = (input: {
     className: string,
     methodType: "instance" | "class",
     category: string,
-  ) => string[];
+  ) => { selectors: string[]; budgetExhausted: boolean };
   readonly protocols: (list: bigint) => string[];
   /** Name of a class defined in this image, from its class_ro_t. */
   readonly localClassName: (address: bigint) => string;
@@ -71,6 +71,18 @@ export const decodeObjcCategories = (input: {
             );
           }
         const owner = className ?? `(${name})`;
+        const instanceMethods = input.methods(
+          read.pointer(category + 16n),
+          owner,
+          "instance",
+          name,
+        );
+        const classMethods = input.methods(
+          read.pointer(category + 24n),
+          owner,
+          "class",
+          name,
+        );
         result.objc_categories.push({
           name,
           class_name: className,
@@ -80,18 +92,8 @@ export const decodeObjcCategories = (input: {
               : className === null
                 ? "unresolved"
                 : "local",
-          instance_methods: input.methods(
-            read.pointer(category + 16n),
-            owner,
-            "instance",
-            name,
-          ),
-          class_methods: input.methods(
-            read.pointer(category + 24n),
-            owner,
-            "class",
-            name,
-          ),
+          instance_methods: instanceMethods.selectors,
+          class_methods: classMethods.selectors,
           protocols: input.protocols(read.pointer(category + 32n)),
           properties: readObjcPropertiesOf(read, read.pointer(category + 40n), {
             owner: `category ${name}`,
@@ -101,9 +103,14 @@ export const decodeObjcCategories = (input: {
           }),
           location: read.location(category),
           decode:
-            className === null
-              ? { status: "partial", reason: "category_class_unresolved" }
-              : { status: "decoded", reason: null },
+            instanceMethods.budgetExhausted || classMethods.budgetExhausted
+              ? {
+                  status: "partial",
+                  reason: "method_list_record_budget_exhausted",
+                }
+              : className === null
+                ? { status: "partial", reason: "category_class_unresolved" }
+                : { status: "decoded", reason: null },
           evidence: read.evidence(category, "Objective-C category_t record"),
         });
       } catch (cause: unknown) {

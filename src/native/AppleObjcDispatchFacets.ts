@@ -103,9 +103,9 @@ export const decodeObjcDispatchFacets = (input: {
     className: string,
     methodType: "instance" | "class",
     category?: string,
-  ): string[] => {
+  ): { selectors: string[]; budgetExhausted: boolean } => {
     const selectors: string[] = [];
-    if (list === 0n) return selectors;
+    if (list === 0n) return { selectors, budgetExhausted: false };
     const flags = read.u32(list),
       count = read.u32(list + 4n),
       relative = (flags & 0x80000000) !== 0;
@@ -113,7 +113,7 @@ export const decodeObjcDispatchFacets = (input: {
     if (stride !== (relative ? 12 : 24))
       throw new TypeError(`Unsupported method stride/flags at ${hex(list)}`);
     for (let index = 0; index < count; index++) {
-      if (!budget.admit()) break;
+      if (!budget.admit()) return { selectors, budgetExhausted: true };
       const entry = list + 8n + BigInt(index * stride);
       const rel = (field: bigint) => {
         const displacement = bytes.readInt32LE(read.offset(field, 4));
@@ -196,7 +196,7 @@ export const decodeObjcDispatchFacets = (input: {
         ),
       });
     }
-    return selectors;
+    return { selectors, budgetExhausted: false };
   };
   const protocolReader = createObjcProtocolReader({
     readers: {
@@ -326,7 +326,11 @@ export const decodeObjcDispatchFacets = (input: {
         });
       }
     }
-    methods(read.pointer(ro + 32n), name, meta ? "class" : "instance");
+    const { budgetExhausted } = methods(
+      read.pointer(ro + 32n),
+      name,
+      meta ? "class" : "instance",
+    );
     result.objc_classes.push({
       name,
       super_class: superclass.name,
@@ -362,8 +366,9 @@ export const decodeObjcDispatchFacets = (input: {
       location: read.location(address),
       superclass_address: superclass.address,
       metaclass_address: meta ? null : hex(read.pointer(address)),
-      decode:
-        superclass.name === null && !root
+      decode: budgetExhausted
+        ? { status: "partial", reason: "method_list_record_budget_exhausted" }
+        : superclass.name === null && !root
           ? { status: "partial", reason: "superclass_binding_unresolved" }
           : decoded,
       evidence: read.evidence(

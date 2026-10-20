@@ -39,6 +39,8 @@ export const createObjcProtocolReader = (input: {
     instance: boolean,
     /** Entries skipped for an empty selector, reported by the declaring protocol. */
     emptySelectors: string[],
+    /** Set when the record budget stops the list before its last entry. */
+    budget: { exhausted: boolean },
   ) => {
     const output: ObjcSwiftMetadata["objc_protocols"][number]["methods"] = [];
     if (address === 0n) return output;
@@ -49,7 +51,10 @@ export const createObjcProtocolReader = (input: {
     if (stride !== (relative ? 12 : 24))
       throw new TypeError("Unsupported Objective-C protocol method entry size");
     for (let index = 0; index < count; index++) {
-      if (!read.admit()) break;
+      if (!read.admit()) {
+        budget.exhausted = true;
+        break;
+      }
       const entry = address + 8n + BigInt(index * stride);
       let selector = relative
         ? entry + BigInt(read.i32(entry))
@@ -88,13 +93,14 @@ export const createObjcProtocolReader = (input: {
       if (protocolName.length === 0)
         throw new TypeError("Objective-C protocol has an empty name");
       const skipped: string[] = [];
+      const budget = { exhausted: false };
       const required = [
-        ...methods(read.pointer(address + 24n), true, true, skipped),
-        ...methods(read.pointer(address + 32n), true, false, skipped),
+        ...methods(read.pointer(address + 24n), true, true, skipped, budget),
+        ...methods(read.pointer(address + 32n), true, false, skipped, budget),
       ];
       const optional = [
-        ...methods(read.pointer(address + 40n), false, true, skipped),
-        ...methods(read.pointer(address + 48n), false, false, skipped),
+        ...methods(read.pointer(address + 40n), false, true, skipped, budget),
+        ...methods(read.pointer(address + 48n), false, false, skipped, budget),
       ];
       for (const message of skipped)
         failures.push(
@@ -112,8 +118,11 @@ export const createObjcProtocolReader = (input: {
         methods: required,
         optional_methods: optional,
         location: read.location(address),
-        decode:
-          skipped.length === 0
+        // A budget-cut list is recoverable with a larger budget, so that
+        // cause is reported first; an empty list is otherwise complete.
+        decode: budget.exhausted
+          ? { status: "partial", reason: "method_list_record_budget_exhausted" }
+          : skipped.length === 0
             ? { status: "decoded", reason: null }
             : { status: "partial", reason: "protocol_method_selector_empty" },
         evidence: read.evidence(
