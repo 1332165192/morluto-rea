@@ -23,11 +23,14 @@ import { err, ok, type Result } from "../domain/result.js";
 import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import {
   PcapConfigurationFailure,
+  assertWiresharkExecutableIdentity,
   inspectPcapClient,
+  locateWiresharkTool,
   resolvePcapTools,
   pcapConfigurationAvailability,
   pcapToolUnavailable,
   type PcapToolSelection,
+  type WiresharkExecutableIdentity,
 } from "./PcapConfiguration.js";
 import {
   parseCapinfosOutput,
@@ -48,6 +51,7 @@ import { PcapSnapshot } from "./PcapSnapshot.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import { ArtifactAnalysisResources } from "../process/ArtifactAnalysisResources.js";
 import { readLinuxResourceLimits } from "../process/LinuxResourceLimits.js";
+import { realpath } from "node:fs/promises";
 
 export const PCAP_PROVIDER_IDENTITY = {
   id: "pcap",
@@ -160,6 +164,10 @@ export class PcapProvider {
   );
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly launcher: PcapCommandLauncher | undefined;
+  private readonly wiresharkIdentities = new Map<
+    string,
+    { readonly path: string; readonly identity: WiresharkExecutableIdentity }
+  >();
   private readonly snapshots = new Set<PcapSnapshot>();
   private readonly snapshotFailures = new Map<
     PcapSnapshot,
@@ -187,10 +195,24 @@ export class PcapProvider {
     let cleanup: PcapCommandCleanup | undefined;
     let retainedCommand: RetainedPcapCommand | undefined;
     let output: Awaited<ReturnType<typeof runPcapCommand>>;
+    const selected = this.wiresharkIdentities.get(command);
     try {
+      if (selected !== undefined) {
+        const before = await this.#resources.read(
+          selected.path,
+          64 * 1024 * 1024,
+          signal,
+        );
+        assertWiresharkExecutableIdentity(
+          operation,
+          selected.path,
+          selected.identity,
+          before,
+        );
+      }
       output = await runPcapCommand({
         operation,
-        command,
+        command: selected?.path ?? command,
         arguments: args,
         limits,
         signal,
@@ -219,6 +241,25 @@ export class PcapProvider {
           cleanup = { reason, resources, capturedOutput };
         },
       });
+      if (selected !== undefined) {
+        const after = await this.#resources.read(
+          selected.path,
+          64 * 1024 * 1024,
+        );
+        assertWiresharkExecutableIdentity(
+          operation,
+          selected.path,
+          selected.identity,
+          after,
+          {
+            capturedOutput: {
+              stdout: output.stdout,
+              stderr: output.stderr,
+              truncated: output.cleanup?.capturedOutput.truncated ?? false,
+            },
+          },
+        );
+      }
     } catch (cause) {
       if (
         retainedCommand !== undefined &&
@@ -263,6 +304,21 @@ export class PcapProvider {
 
   private async client(operation: PcapOperation, signal?: AbortSignal) {
     const selection = resolvePcapTools(this.environment);
+    this.wiresharkIdentities.clear();
+    for (const selected of [selection.tshark, selection.capinfos]) {
+      const path = locateWiresharkTool(selected, this.environment);
+      if (path === undefined) continue;
+      const resolvedPath = await realpath(path);
+      const identity = await this.#resources.read(
+        resolvedPath,
+        64 * 1024 * 1024,
+        signal,
+      );
+      this.wiresharkIdentities.set(selected.command, {
+        path: resolvedPath,
+        identity,
+      });
+    }
     const identity = await inspectPcapClient(
       selection,
       async (command) =>
@@ -292,9 +348,30 @@ export class PcapProvider {
         tshark_command: selection.tshark.command,
         tshark_source: selection.tshark.source,
         tshark_version: identity.tsharkVersion,
+        tshark_resolved_path:
+          this.wiresharkIdentities.get(selection.tshark.command)?.path ?? null,
+        tshark_sha256:
+          this.wiresharkIdentities.get(selection.tshark.command)?.identity
+            .sha256 ?? null,
+        tshark_identity_status: this.wiresharkIdentities.has(
+          selection.tshark.command,
+        )
+          ? "verified"
+          : "unresolved",
         capinfos_command: selection.capinfos.command,
         capinfos_source: selection.capinfos.source,
         capinfos_version: identity.capinfosVersion,
+        capinfos_resolved_path:
+          this.wiresharkIdentities.get(selection.capinfos.command)?.path ??
+          null,
+        capinfos_sha256:
+          this.wiresharkIdentities.get(selection.capinfos.command)?.identity
+            .sha256 ?? null,
+        capinfos_identity_status: this.wiresharkIdentities.has(
+          selection.capinfos.command,
+        )
+          ? "verified"
+          : "unresolved",
       },
     };
   }

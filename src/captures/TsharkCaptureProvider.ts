@@ -59,6 +59,7 @@ import {
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import {
   TSHARK_COMMAND_ENV,
+  assertWiresharkExecutableIdentity,
   locateWiresharkTool,
   parseWiresharkVersion,
   selectWiresharkTool,
@@ -229,13 +230,9 @@ export class TsharkCaptureProvider implements PacketCapturePort {
             "Configured resource limiter changed during analysis.",
             { capturedOutput },
           );
-        if (current.sha256 !== tool.sha256)
-          throw new AnalysisArtifactChangedError(
-            operation,
-            command,
-            "Configured TShark executable changed during analysis.",
-            { capturedOutput },
-          );
+        assertWiresharkExecutableIdentity(operation, command, tool, current, {
+          capturedOutput,
+        });
         phase = previousPhase;
         resourcePath = "path" in input ? input.path : command;
         if (output.exitCode !== 0)

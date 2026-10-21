@@ -6,6 +6,32 @@ import type { ProviderRejectionCode } from "../contracts/providerSelection.js";
 import type { AnalysisErrorOptions } from "../domain/analysisErrorBase.js";
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import type { JsonValue } from "../domain/jsonValue.js";
+import { AnalysisArtifactChangedError } from "../domain/analysisErrorCore.js";
+
+export interface WiresharkExecutableIdentity {
+  readonly bytes: Uint8Array;
+  readonly sha256: string;
+}
+
+/** Shared identity owner used to verify each caller-selected tool run. */
+export const assertWiresharkExecutableIdentity = (
+  operation: string,
+  path: string,
+  expected: WiresharkExecutableIdentity,
+  actual: WiresharkExecutableIdentity,
+  options?: AnalysisErrorOptions,
+): void => {
+  if (
+    actual.bytes.byteLength !== expected.bytes.byteLength ||
+    actual.sha256 !== expected.sha256
+  )
+    throw new AnalysisArtifactChangedError(
+      operation,
+      path,
+      "The selected Wireshark executable changed during analysis.",
+      options,
+    );
+};
 
 /** Environment keys selecting the caller's tshark and capinfos binaries. */
 export const TSHARK_COMMAND_ENV = "REA_TSHARK_COMMAND";
@@ -108,7 +134,8 @@ export const locateWiresharkTool = (
   selection: WiresharkToolSelection,
   environment: Readonly<Record<string, string | undefined>>,
 ): string | undefined => {
-  if (selection.source === "environment") return selection.command;
+  if (selection.source === "environment" || isAbsolute(selection.command))
+    return selection.command;
   for (const directory of (environment.PATH ?? "").split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     const candidate = join(directory, selection.command);

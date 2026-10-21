@@ -41,9 +41,15 @@ const client = z.strictObject({
   tshark_command: z.string().min(1),
   tshark_source: z.enum(["environment", "path"]),
   tshark_version: z.string().min(1).nullable(),
+  tshark_resolved_path: localPathStringSchema.nullable(),
+  tshark_sha256: digestSchema.nullable(),
+  tshark_identity_status: z.enum(["verified", "unresolved"]),
   capinfos_command: z.string().min(1),
   capinfos_source: z.enum(["environment", "path"]),
   capinfos_version: z.string().min(1).nullable(),
+  capinfos_resolved_path: localPathStringSchema.nullable(),
+  capinfos_sha256: digestSchema.nullable(),
+  capinfos_identity_status: z.enum(["verified", "unresolved"]),
 });
 
 const endpoint = z.strictObject({
