@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { copyFile } from "node:fs/promises";
+import { copyFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -69,52 +69,6 @@ describe.skipIf(process.platform !== "darwin")(
     );
 
     mcpTest(
-      "keeps one ordered outcome per input when swift-demangle skips `_`",
-      async ({ mcp, onTestFinished }) => {
-        const target = join(
-          await createTestTempDirectory("rea-demangle-mcp-"),
-          "tool",
-        );
-        await copyFile("/usr/bin/true", target);
-        const client = await openProductionTarget(mcp, onTestFinished, target);
-        const skipped = { input: "_", output: "_", status: "unchanged" };
-
-        for (const [symbols, expected] of [
-          [["_"], [skipped]],
-          [
-            ["_", "$s4main3FooV", "_Sa"],
-            [
-              skipped,
-              {
-                input: "$s4main3FooV",
-                output: "main.Foo",
-                status: "demangled",
-              },
-              { input: "_Sa", output: "_Sa", status: "unchanged" },
-            ],
-          ],
-        ] as const) {
-          const called = await client.callTool({
-            name: "demangle_swift",
-            arguments: { symbols },
-          });
-          expect(called.isError, JSON.stringify(called.content)).not.toBe(true);
-          const result = demangledSchema.parse(
-            called.structuredContent,
-          ).normalized_result;
-          expect(result.symbols).toEqual(expected);
-          expect(result.limitations).toEqual([
-            expect.stringContaining("skips the symbol `_`"),
-          ]);
-          expect(
-            result.provenance.find(({ tool }) => tool === "swift-demangle")
-              ?.command,
-          ).not.toContain("_");
-        }
-      },
-    );
-
-    mcpTest(
       "reports undecodable symbols with any Swift mangling prefix as invalid",
       async ({ mcp, onTestFinished }) => {
         const target = join(
@@ -168,6 +122,107 @@ describe.skipIf(process.platform !== "darwin")(
         const { stdout } = await execute(executable, command.slice(1));
         expect(symbols.map(({ output }) => output)).toEqual(
           stdout.replace(/\n$/u, "").split("\n"),
+        );
+      },
+    );
+  },
+);
+
+describe.skipIf(process.platform !== "darwin")(
+  "swift-demangle arguments forwarded through MCP",
+  () => {
+    mcpTest(
+      "keeps one ordered outcome per input when swift-demangle skips `_`",
+      async ({ mcp, onTestFinished }) => {
+        const target = join(
+          await createTestTempDirectory("rea-demangle-mcp-"),
+          "tool",
+        );
+        await copyFile("/usr/bin/true", target);
+        const client = await openProductionTarget(mcp, onTestFinished, target);
+        const skipped = { input: "_", output: "_", status: "unchanged" };
+
+        for (const [symbols, expected] of [
+          [["_"], [skipped]],
+          [
+            ["_", "$s4main3FooV", "_Sa"],
+            [
+              skipped,
+              {
+                input: "$s4main3FooV",
+                output: "main.Foo",
+                status: "demangled",
+              },
+              { input: "_Sa", output: "_Sa", status: "unchanged" },
+            ],
+          ],
+        ] as const) {
+          const called = await client.callTool({
+            name: "demangle_swift",
+            arguments: { symbols },
+          });
+          expect(called.isError, JSON.stringify(called.content)).not.toBe(true);
+          const result = demangledSchema.parse(
+            called.structuredContent,
+          ).normalized_result;
+          expect(result.symbols).toEqual(expected);
+          expect(result.limitations).toEqual([
+            expect.stringContaining("skips the symbol `_`"),
+          ]);
+          expect(
+            result.provenance.find(({ tool }) => tool === "swift-demangle")
+              ?.command,
+          ).not.toContain("_");
+        }
+      },
+    );
+
+    mcpTest(
+      "reports `@` symbols unchanged instead of reading them as response files",
+      async ({ mcp, onTestFinished }) => {
+        const directory = await createTestTempDirectory("rea-demangle-mcp-");
+        const target = join(directory, "tool");
+        await copyFile("/usr/bin/true", target);
+        // A real response file whose contents would demangle if it were read.
+        const responseFile = join(directory, "symbols.rsp");
+        await writeFile(responseFile, "$s4main3FooV\n");
+        const client = await openProductionTarget(mcp, onTestFinished, target);
+        const macro =
+          "@__swiftmacro_1a13testStringifyAA1bySi_SitF9stringifyfMf_";
+        const symbols = [
+          `@${responseFile}`,
+          "@/dev/null",
+          macro,
+          "$s4main3FooV",
+        ];
+
+        const called = await client.callTool({
+          name: "demangle_swift",
+          arguments: { symbols },
+        });
+        expect(called.isError, JSON.stringify(called.content)).not.toBe(true);
+        const result = demangledSchema.parse(
+          called.structuredContent,
+        ).normalized_result;
+        expect(result.symbols).toEqual([
+          { input: symbols[0], output: symbols[0], status: "unchanged" },
+          { input: "@/dev/null", output: "@/dev/null", status: "unchanged" },
+          {
+            input: macro,
+            output:
+              "freestanding macro expansion #1 of stringify in a.testStringify(a: Swift.Int, b: Swift.Int) -> ()",
+            status: "demangled",
+          },
+          { input: "$s4main3FooV", output: "main.Foo", status: "demangled" },
+        ]);
+        expect(result.limitations).toEqual([
+          expect.stringContaining("as a response file"),
+        ]);
+        const command = result.provenance.find(
+          ({ tool }) => tool === "swift-demangle",
+        )?.command;
+        expect(command?.some((argument) => argument.startsWith("@"))).toBe(
+          false,
         );
       },
     );

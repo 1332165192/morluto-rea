@@ -52,11 +52,14 @@ describe("parseDemangledSymbols", () => {
       "_$eBogus",
       "_Tprintf",
     ];
-    expect(
-      parseDemangledSymbols(inputs, `${inputs.join("\n")}\n`).symbols.map(
-        ({ status }) => status,
-      ),
-    ).toEqual([...Array<string>(8).fill("invalid"), "unchanged"]);
+    // The demangler echoes each forwarded argument it cannot decode.
+    const echoed = `${swiftDemangleArguments(inputs).join("\n")}\n`;
+    const symbols = parseDemangledSymbols(inputs, echoed).symbols;
+    expect(symbols.map(({ status }) => status)).toEqual([
+      ...Array<string>(8).fill("invalid"),
+      "unchanged",
+    ]);
+    expect(symbols.map(({ output }) => output)).toEqual(inputs);
   });
 
   it("keeps the demangler's adjusted spelling of an undecoded name out of demangled", () => {
@@ -118,6 +121,26 @@ describe("parseDemangledSymbols", () => {
     ]);
   });
 
+  it("rejects an omitted or unterminated record instead of reporting an empty decoding", () => {
+    expect(() => parseDemangledSymbols(["$s4main3FooV"], "")).toThrow(
+      "swift-demangle output count does not match input",
+    );
+    expect(() => parseDemangledSymbols(["$s4main3FooV"], "main.Foo")).toThrow(
+      "swift-demangle output ended inside a record",
+    );
+  });
+
+  it("throws TypeError when output count does not match input count", () => {
+    expect(() =>
+      parseDemangledSymbols(["sym1", "sym2"], "demangled1\n"),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseDemangledSymbols(["sym1"], "demangled1\ndemangled2\n"),
+    ).toThrow("swift-demangle output count does not match input");
+  });
+});
+
+describe("swift-demangle argument selection", () => {
   it("reports `_`, which swift-demangle skips without a record, apart from the demangled batch", () => {
     const inputs = ["_", "$s4main3FooV", "_", "_Sa"];
     expect(swiftDemangleArguments(inputs)).toEqual(["$s4main3FooV", "_Sa"]);
@@ -140,21 +163,31 @@ describe("parseDemangledSymbols", () => {
     ).toEqual([]);
   });
 
-  it("rejects an omitted or unterminated record instead of reporting an empty decoding", () => {
-    expect(() => parseDemangledSymbols(["$s4main3FooV"], "")).toThrow(
-      "swift-demangle output count does not match input",
-    );
-    expect(() => parseDemangledSymbols(["$s4main3FooV"], "main.Foo")).toThrow(
-      "swift-demangle output ended inside a record",
-    );
-  });
-
-  it("throws TypeError when output count does not match input count", () => {
-    expect(() =>
-      parseDemangledSymbols(["sym1", "sym2"], "demangled1\n"),
-    ).toThrow(TypeError);
-    expect(() =>
-      parseDemangledSymbols(["sym1"], "demangled1\ndemangled2\n"),
-    ).toThrow("swift-demangle output count does not match input");
+  it("never forwards `@` symbols, which LLVM would expand as response files", () => {
+    const macro = "@__swiftmacro_1a13testStringifyAA1bySi_SitF9stringifyfMf_";
+    const inputs = ["@/dev/null", macro, "$s4main3FooV", "_", "@x", "a@b"];
+    expect(swiftDemangleArguments(inputs)).toEqual([
+      "$s1a13testStringifyAA1bySi_SitF9stringifyfMf_",
+      "$s4main3FooV",
+      "a@b",
+    ]);
+    const expansion =
+      "freestanding macro expansion #1 of stringify in a.testStringify(a: Swift.Int, b: Swift.Int) -> ()";
+    expect(
+      parseDemangledSymbols(inputs, `${expansion}\nmain.Foo\na@b\n`),
+    ).toEqual({
+      symbols: [
+        { input: "@/dev/null", output: "@/dev/null", status: "unchanged" },
+        { input: macro, output: expansion, status: "demangled" },
+        { input: "$s4main3FooV", output: "main.Foo", status: "demangled" },
+        { input: "_", output: "_", status: "unchanged" },
+        { input: "@x", output: "@x", status: "unchanged" },
+        { input: "a@b", output: "a@b", status: "unchanged" },
+      ],
+      limitations: [
+        expect.stringContaining("as a response file"),
+        expect.stringContaining("skips the symbol `_`"),
+      ],
+    });
   });
 });
