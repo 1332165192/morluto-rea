@@ -306,10 +306,29 @@ export class PcapProvider {
   private async client(operation: PcapOperation, signal?: AbortSignal) {
     const selection = resolvePcapTools(this.environment);
     this.wiresharkIdentities.clear();
-    for (const selected of [selection.tshark, selection.capinfos]) {
+    for (const [name, selected] of [
+      ["tshark", selection.tshark],
+      ["capinfos", selection.capinfos],
+    ] as const) {
       const path = locateWiresharkTool(selected, this.environment);
       if (path === undefined) continue;
-      const resolvedPath = await realpath(path);
+      let resolvedPath: string;
+      try {
+        resolvedPath = await realpath(path);
+      } catch (cause) {
+        if (
+          cause instanceof Error &&
+          "code" in cause &&
+          (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+        )
+          throw new PcapConfigurationFailure(
+            `${name}_missing`,
+            `The selected ${name} executable could not be found at its configured path.`,
+            { command: selected.command },
+            { cause },
+          );
+        throw cause;
+      }
       const snapshot = await this.#resources.read(
         resolvedPath,
         64 * 1024 * 1024,

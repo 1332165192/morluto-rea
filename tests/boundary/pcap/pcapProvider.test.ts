@@ -189,7 +189,7 @@ exit 2
   if (!result.ok)
     expect(projectAnalysisError(result.error)).toMatchObject({
       code: "artifact_changed",
-      path: tshark,
+      details: { path: tshark },
     });
 });
 

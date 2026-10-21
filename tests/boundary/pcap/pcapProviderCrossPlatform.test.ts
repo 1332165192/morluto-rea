@@ -110,6 +110,28 @@ it("inspects both tools through cross-platform stubs", async () => {
   });
 });
 
+it("projects a missing configured tool as a capability gap", async () => {
+  const provider = new PcapProvider({
+    environment: {
+      REA_TSHARK_COMMAND: tsharkStub,
+      REA_CAPINFOS_COMMAND: join(import.meta.dirname, "missing-capinfos"),
+    },
+  });
+  onTestFinished(() => provider.close());
+  const result = await provider.execute({
+    operation: "inspect_pcap_client",
+    input: {},
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "capability_unavailable",
+    message: expect.stringContaining(
+      "Supply Wireshark 4.x tshark and capinfos",
+    ),
+  });
+});
+
 it.skipIf(isWindows)(
   "rejects TShark that changes during its version probe",
   async () => {
