@@ -42,6 +42,18 @@ cliTest(
   },
 );
 
+cliTest("rejects empty and NUL BEAM paths before reading", async ({ cli }) => {
+  const root = await createTestTempDirectory("rea-beam-cli-path-");
+  for (const path of ["", "app\0.beam"]) {
+    const result = await cli.run({
+      arguments: ["inspect-erlang-beam", path, "--json"],
+      cwd: root,
+    });
+    expect(result.exitCode, result.stderr).not.toBe(0);
+    expect(result.stdout).not.toContain("sha256");
+  }
+});
+
 cliTest("reports a truncated BEAM as invalid input", async ({ cli }) => {
   const root = await createTestTempDirectory("rea-beam-cli-bad-");
   const path = join(root, "broken.beam");

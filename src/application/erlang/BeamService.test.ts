@@ -42,10 +42,21 @@ it("rejects a relative path and extra arguments before reading", async () => {
     path: report.artifact.path,
     extra: true,
   });
+  const nul = await service.inspect({ path: "/artifacts/app\0.beam" });
   expect(relative.ok).toBe(false);
   expect(extra.ok).toBe(false);
-  if (!relative.ok) expect(relative.error).toBeInstanceOf(AnalysisInputError);
+  expect(nul.ok).toBe(false);
+  if (!relative.ok)
+    expect(relative.error).toMatchObject({
+      _tag: "AnalysisInputError",
+      issues: [{ path: ["path"] }],
+    });
   if (!extra.ok) expect(extra.error).toBeInstanceOf(AnalysisInputError);
+  if (!nul.ok)
+    expect(nul.error).toMatchObject({
+      _tag: "AnalysisInputError",
+      issues: [{ path: ["path"] }],
+    });
   expect(calls).toBe(0);
 });
 

@@ -8,6 +8,7 @@ import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { inspectErlangBeamInputSchema } from "../domain/erlang/beam.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 
 /** Resolve caller paths and inspect BEAM IFF tables through the shared workflow. */
 export const registerErlangCommands = (
@@ -18,7 +19,7 @@ export const registerErlangCommands = (
     description:
       "Inspect Erlang BEAM atoms, exports, imports and the Code header without executing bytecode",
     args: z.object({
-      path: z.string().describe("Local BEAM file"),
+      path: localPathStringSchema.describe("Local BEAM file"),
     }),
     options: z.object({
       maxFileBytes: inspectErlangBeamInputSchema.shape.max_file_bytes,
