@@ -29,6 +29,7 @@ import {
   resolvePcapTools,
   pcapConfigurationAvailability,
   pcapToolUnavailable,
+  wiresharkExecutableIdentity,
   type PcapToolSelection,
   type WiresharkExecutableIdentity,
 } from "./PcapConfiguration.js";
@@ -207,7 +208,7 @@ export class PcapProvider {
           operation,
           selected.path,
           selected.identity,
-          before,
+          wiresharkExecutableIdentity(before),
         );
       }
       output = await runPcapCommand({
@@ -250,7 +251,7 @@ export class PcapProvider {
           operation,
           selected.path,
           selected.identity,
-          after,
+          wiresharkExecutableIdentity(after),
           {
             capturedOutput: {
               stdout: output.stdout,
@@ -309,14 +310,14 @@ export class PcapProvider {
       const path = locateWiresharkTool(selected, this.environment);
       if (path === undefined) continue;
       const resolvedPath = await realpath(path);
-      const identity = await this.#resources.read(
+      const snapshot = await this.#resources.read(
         resolvedPath,
         64 * 1024 * 1024,
         signal,
       );
       this.wiresharkIdentities.set(selected.command, {
         path: resolvedPath,
-        identity,
+        identity: wiresharkExecutableIdentity(snapshot),
       });
     }
     const identity = await inspectPcapClient(

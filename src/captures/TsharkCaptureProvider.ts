@@ -60,6 +60,7 @@ import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import {
   TSHARK_COMMAND_ENV,
   assertWiresharkExecutableIdentity,
+  wiresharkExecutableIdentity,
   locateWiresharkTool,
   parseWiresharkVersion,
   selectWiresharkTool,
@@ -156,11 +157,12 @@ export class TsharkCaptureProvider implements PacketCapturePort {
         );
       const command = await realpath(configured);
       await access(command, constants.X_OK);
-      const tool = await this.#resources.read(
+      const toolSnapshot = await this.#resources.read(
         command,
         64 * 1024 * 1024,
         options?.signal,
       );
+      const tool = wiresharkExecutableIdentity(toolSnapshot);
       const configuredLimiter =
         this.environment.REA_TSHARK_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
       if (!isAbsolute(configuredLimiter))
@@ -230,9 +232,13 @@ export class TsharkCaptureProvider implements PacketCapturePort {
             "Configured resource limiter changed during analysis.",
             { capturedOutput },
           );
-        assertWiresharkExecutableIdentity(operation, command, tool, current, {
-          capturedOutput,
-        });
+        assertWiresharkExecutableIdentity(
+          operation,
+          command,
+          tool,
+          wiresharkExecutableIdentity(current),
+          { capturedOutput },
+        );
         phase = previousPhase;
         resourcePath = "path" in input ? input.path : command;
         if (output.exitCode !== 0)

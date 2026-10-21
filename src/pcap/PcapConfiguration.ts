@@ -9,9 +9,18 @@ import type { JsonValue } from "../domain/jsonValue.js";
 import { AnalysisArtifactChangedError } from "../domain/analysisErrorCore.js";
 
 export interface WiresharkExecutableIdentity {
-  readonly bytes: Uint8Array;
+  readonly bytes: number;
   readonly sha256: string;
 }
+
+/** Retain only identity facts after a bounded executable read. */
+export const wiresharkExecutableIdentity = (snapshot: {
+  readonly bytes: Uint8Array;
+  readonly sha256: string;
+}): WiresharkExecutableIdentity => ({
+  bytes: snapshot.bytes.byteLength,
+  sha256: snapshot.sha256,
+});
 
 /** Shared identity owner used to verify each caller-selected tool run. */
 export const assertWiresharkExecutableIdentity = (
@@ -21,10 +30,7 @@ export const assertWiresharkExecutableIdentity = (
   actual: WiresharkExecutableIdentity,
   options?: AnalysisErrorOptions,
 ): void => {
-  if (
-    actual.bytes.byteLength !== expected.bytes.byteLength ||
-    actual.sha256 !== expected.sha256
-  )
+  if (actual.bytes !== expected.bytes || actual.sha256 !== expected.sha256)
     throw new AnalysisArtifactChangedError(
       operation,
       path,

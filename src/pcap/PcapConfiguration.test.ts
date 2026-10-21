@@ -11,6 +11,7 @@ import {
   parseWiresharkVersion,
   resolvePcapTools,
   selectWiresharkTool,
+  wiresharkExecutableIdentity,
 } from "./PcapConfiguration.js";
 import { parseCapinfosOutput, parseTsharkJsonOutput } from "./PcapOutput.js";
 
@@ -155,6 +156,16 @@ describe("parseWiresharkVersion", () => {
       parseWiresharkVersion("TShark (Wireshark) 3.6.2\n", "tshark"),
     ).toThrow(/requires Wireshark 4\.x/u);
   });
+});
+
+it("projects executable snapshots to compact identity facts", () => {
+  const bytes = new Uint8Array(64);
+  const identity = wiresharkExecutableIdentity({
+    bytes,
+    sha256: "a".repeat(64),
+  });
+  expect(identity).toEqual({ bytes: 64, sha256: "a".repeat(64) });
+  expect(Object.values(identity)).not.toContain(bytes);
 });
 
 const REAL_CAPINFOS = [
