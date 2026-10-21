@@ -132,6 +132,7 @@ export class HopperClient {
   #nextId = 1;
   #closing = false;
   #launcherExitCode: number | null | undefined;
+  #launcherExitPrecededInterruption = false;
   #launcherFailureDiagnostic: HopperStartupFailureDiagnostic | undefined;
   #operationFailure: OperationFailureRecord | undefined;
   #startupFailureResult: AnalysisError | undefined;
@@ -393,12 +394,23 @@ export class HopperClient {
       this.#options.startupTimeoutMs,
       signal,
     );
+    this.#launcherExitPrecededInterruption = false;
+    const recordObservedExitOrder = (): void => {
+      this.#launcherExitPrecededInterruption =
+        this.#resources.launch !== undefined &&
+        this.#launcherExitCode !== undefined;
+    };
+    deadline.signal.addEventListener("abort", recordObservedExitOrder, {
+      once: true,
+    });
+    if (deadline.signal.aborted) recordObservedExitOrder();
     try {
       const result = await this.#startWithin(deadline);
       return result.ok && deadline.signal.aborted
         ? this.#startupFailure(await this.#startupInterruption(deadline))
         : result;
     } finally {
+      deadline.signal.removeEventListener("abort", recordObservedExitOrder);
       deadline.dispose();
     }
   }
@@ -831,7 +843,20 @@ export class HopperClient {
 
   async #startupInterruption(
     deadline: ProviderStartupDeadline,
-  ): Promise<HopperCancelledError | HopperTimeoutError | HopperProtocolError> {
+  ): Promise<HopperError> {
+    const launch = this.#resources.launch;
+    const exitCode = this.#launcherExitCode;
+    if (
+      this.#launcherExitPrecededInterruption &&
+      launch !== undefined &&
+      exitCode !== undefined &&
+      (launch.providerLifetime === "launcher-process" || exitCode !== 0)
+    )
+      return this.#launcherStartupFailure(
+        launch.providerLifetime === "launcher-process",
+        exitCode,
+        deadline,
+      );
     if (deadline.signal.reason === STARTUP_OWNER_CLOSED)
       return new HopperProtocolError("Hopper session closed during startup");
     if (deadline.interruption === "cancelled")

@@ -1,8 +1,14 @@
 import { access } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
 
 import { expect, it, vi } from "vitest";
 
 import { HopperClient } from "../../../../src/hopper/HopperClient.js";
+import type { BridgeLauncher } from "../../../../src/hopper/BridgeLauncher.js";
+import {
+  HopperCancelledError,
+  HopperProcessError,
+} from "../../../../src/domain/hopperErrors.js";
 import { ok } from "../../../../src/domain/result.js";
 import { ProviderRunLineage } from "../../../../src/process/ProviderRunLineage.js";
 import { waitForExit } from "../../../support/process/processFixture.js";
@@ -10,6 +16,151 @@ import {
   HopperFixtureLauncher,
   trackHopperClient,
 } from "./hopperClient.fixture.js";
+
+const ownedChildLauncher = (
+  source: string,
+  onSpawn?: (child: ChildProcess, sessionDirectory: string) => void,
+): BridgeLauncher => ({
+  async launch(session) {
+    const child = spawn(process.execPath, ["-e", source], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    onSpawn?.(child, session.directory);
+    return ok({
+      process: child,
+      ownsProcessLifetime: true,
+      providerLifetime: "launcher-process",
+      shutdownMode: "process-cleanup",
+      cleanup: async () => {
+        const signaled = child.exitCode === null && child.signalCode === null;
+        if (signaled) child.kill("SIGTERM");
+        return (await waitForExit(child, 5_000))
+          ? { cleaned: true as const, signaled }
+          : {
+              cleaned: false as const,
+              reason: "Fixture child did not exit",
+            };
+      },
+    });
+  },
+});
+
+it("keeps an owned launcher exit observed before abort as the startup failure", async () => {
+  const controller = new AbortController();
+  const abortReason = new Error("caller aborted after observed launcher exit");
+  let ownedChild: ChildProcess | undefined;
+  let runtimeDirectory: string | undefined;
+  let observeExit!: () => void;
+  const exitObserved = new Promise<void>((resolve) => {
+    observeExit = resolve;
+  });
+  const client = trackHopperClient(
+    new HopperClient({
+      startupTimeoutMs: 10_000,
+      launcher: ownedChildLauncher("process.exit(3)", (child, directory) => {
+        ownedChild = child;
+        runtimeDirectory = directory;
+      }),
+      onDiagnostic: (event) => {
+        if (event.type !== "launcher-exit") return;
+        observeExit();
+        setImmediate(() => controller.abort(abortReason));
+      },
+    }),
+  );
+
+  try {
+    const started = await client.start(controller.signal);
+    await exitObserved;
+    expect(controller.signal.reason).toBe(abortReason);
+    expect(started).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "HopperProcessError",
+        exitCode: 3,
+        stage: "launch",
+      },
+    });
+    if (started.ok) throw new Error("Expected the owned launcher failure");
+    if (!(started.error instanceof HopperProcessError))
+      throw new Error("Expected HopperProcessError");
+    expect(started.error.cleanupIncomplete).toBe(false);
+    expect(started.error.launcherFailure).toMatchObject({ exit_code: 3 });
+    if (ownedChild === undefined) throw new Error("Missing owned launcher");
+    expect(await waitForExit(ownedChild, 5_000)).toBe(true);
+    expect(ownedChild.exitCode).toBe(3);
+    if (runtimeDirectory === undefined)
+      throw new Error("Missing owned runtime directory");
+    await expect(access(runtimeDirectory)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  } finally {
+    await client.close();
+  }
+
+  const control = trackHopperClient(
+    new HopperClient({
+      startupTimeoutMs: 10_000,
+      launcher: ownedChildLauncher("process.exit(3)"),
+    }),
+  );
+  try {
+    const started = await control.start();
+    expect(started).toMatchObject({
+      ok: false,
+      error: { _tag: "HopperProcessError", exitCode: 3, stage: "launch" },
+    });
+  } finally {
+    await control.close();
+  }
+});
+
+it("preserves the exact caller reason when cancellation precedes launcher exit", async () => {
+  const controller = new AbortController();
+  const abortReason = new Error("caller cancelled before launcher exit");
+  let launchChild!: () => void;
+  let runtimeDirectory: string | undefined;
+  const childLaunched = new Promise<void>((resolve) => {
+    launchChild = resolve;
+  });
+  const client = trackHopperClient(
+    new HopperClient({
+      startupTimeoutMs: 10_000,
+      launcher: ownedChildLauncher(
+        'process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);',
+        (_child, directory) => {
+          runtimeDirectory = directory;
+          launchChild();
+        },
+      ),
+    }),
+  );
+
+  try {
+    const starting = client.start(controller.signal);
+    await childLaunched;
+    controller.abort(abortReason);
+    const started = await starting;
+    expect(started).toMatchObject({
+      ok: false,
+      error: { _tag: "HopperCancelledError", cause: abortReason },
+    });
+    if (started.ok) throw new Error("Expected caller cancellation");
+    expect(started.error).toBeInstanceOf(HopperCancelledError);
+    expect(started.error.cause).toBe(abortReason);
+    if (runtimeDirectory === undefined)
+      throw new Error("Missing owned runtime directory");
+    await expect(access(runtimeDirectory)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  } finally {
+    await client.close();
+  }
+});
 
 it("preserves a warm provider when an already cancelled caller joins", async () => {
   const launcher = new HopperFixtureLauncher();
