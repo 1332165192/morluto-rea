@@ -50,6 +50,8 @@ import { createPcapEvidence } from "../domain/pcap/pcapEvidence.js";
 import { preparePcapNativeBound } from "./PcapNativeBound.js";
 import { PcapSnapshot } from "./PcapSnapshot.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { artifactFileCancellationCause } from "../artifacts/ArtifactFileOperation.js";
 import { ArtifactAnalysisResources } from "../process/ArtifactAnalysisResources.js";
 import { readLinuxResourceLimits } from "../process/LinuxResourceLimits.js";
 import { realpath } from "node:fs/promises";
@@ -133,6 +135,7 @@ const pcapCommandCleanupError = (
 export interface PcapProviderOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly launcher?: PcapCommandLauncher;
+  readonly artifactReader?: typeof readStableArtifact;
 }
 
 interface RetainedPcapCommand {
@@ -153,16 +156,7 @@ interface RetainedSnapshotFailure {
 
 /** Inspect saved captures through bounded, owned tool processes and one stable input copy. */
 export class PcapProvider {
-  readonly #resources = new ArtifactAnalysisResources(
-    "pcap",
-    "inspect_pcap_capture",
-    readStableArtifact,
-    readLinuxResourceLimits,
-    {
-      message: "A packet summary is already active; retry after it completes.",
-      details: { max_concurrent_inspections: 1 },
-    },
-  );
+  readonly #resources: ArtifactAnalysisResources;
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly launcher: PcapCommandLauncher | undefined;
   private readonly wiresharkIdentities = new Map<
@@ -182,6 +176,17 @@ export class PcapProvider {
   constructor(options: PcapProviderOptions = {}) {
     this.environment = options.environment ?? process.env;
     this.launcher = options.launcher;
+    this.#resources = new ArtifactAnalysisResources(
+      "pcap",
+      "inspect_pcap_capture",
+      options.artifactReader ?? readStableArtifact,
+      readLinuxResourceLimits,
+      {
+        message:
+          "A packet summary is already active; retry after it completes.",
+        details: { max_concurrent_inspections: 1 },
+      },
+    );
   }
 
   private async run(
@@ -664,17 +669,39 @@ export class PcapProvider {
         );
       }
     } catch (cause) {
-      result = err(
-        cause instanceof AnalysisError
-          ? cause
-          : cause instanceof PcapConfigurationFailure
-            ? pcapToolUnavailable(request.operation, cause.message, {
-                cause,
+      const classifyArtifactFailure = (failure: unknown): AnalysisError =>
+        failure instanceof AnalysisError
+          ? failure
+          : failure instanceof ArtifactReaderFailure &&
+              failure.reason === "cancelled"
+            ? new AnalysisCancelledError(request.operation, {
+                cause: artifactFileCancellationCause(failure),
+                ...(failure.partialObservation === undefined
+                  ? {}
+                  : { partialObservation: failure.partialObservation }),
               })
             : new AnalysisProtocolError(
-                `Packet-capture analysis failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-                { cause },
-              ),
+                `Packet-capture analysis failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+                { cause: failure },
+              );
+      result = err(
+        cause instanceof ArtifactReaderFailure
+          ? this.#resources.cleanupFailure(
+              cause,
+              classifyArtifactFailure,
+              undefined,
+              request.operation,
+            )
+          : cause instanceof AnalysisError
+            ? cause
+            : cause instanceof PcapConfigurationFailure
+              ? pcapToolUnavailable(request.operation, cause.message, {
+                  cause,
+                })
+              : new AnalysisProtocolError(
+                  `Packet-capture analysis failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+                  { cause },
+                ),
       );
     }
     if (signal?.aborted && result.ok)

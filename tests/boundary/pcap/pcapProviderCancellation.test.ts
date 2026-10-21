@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { AnalysisCancelledError } from "../../../src/domain/analysisErrorCore.js";
+import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
+import { readStableArtifact } from "../../../src/artifacts/readStableArtifact.js";
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { resolvedAnalysisError } from "../../../src/domain/analysisErrorBase.js";
 import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
@@ -62,6 +64,7 @@ const fixture = async (
   reason: unknown,
   failedCleanupAttempts: number,
   activeVersion = false,
+  artifactReader: typeof readStableArtifact = readStableArtifact,
 ) => {
   const root = await createTestTempDirectory("rea-pcap-provider-cancel-");
   const tools = await writeTools(root, mode, activeVersion);
@@ -100,6 +103,7 @@ const fixture = async (
       REA_CAPINFOS_COMMAND: tools.capinfos,
     },
     launcher,
+    artifactReader,
   });
   onTestFinished(async () => provider.close());
   return { provider, root, capture, cleanupAttempts: () => cleanupAttempts };
@@ -121,6 +125,31 @@ it("availability preserves the producer's exact cancellation reason", async () =
   }
   expect(failure).toBeInstanceOf(AnalysisCancelledError);
   expect(failure).toMatchObject({ cause: reason });
+});
+
+it("executable identity hashing preserves artifact-read cancellation", async () => {
+  const controller = new AbortController();
+  const reason = { caller: "cancel executable identity read" };
+  const { provider } = await fixture(
+    "active",
+    controller,
+    reason,
+    0,
+    false,
+    async () => {
+      throw new ArtifactReaderFailure("cancelled", "identity read cancelled", {
+        cancellation: { reason },
+      });
+    },
+  );
+  const result = await provider.execute(
+    { operation: "inspect_pcap_client", input: {} },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+  expect(result.error.cause).toBe(reason);
 });
 
 it("active cancellation stays primary through retained command and snapshot cleanup retry", async () => {
