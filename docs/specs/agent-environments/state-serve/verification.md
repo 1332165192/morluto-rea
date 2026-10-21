@@ -44,13 +44,6 @@ The review fixes are covered by these tests, all passing in the runs above:
   unchanged. Over loopback HTTP, `close()` of a served state returned while a
   download that never answers was in progress, and that download's signal was
   aborted.
-- File closes: with an injected close failure, `data/add` of a `file://` uri
-  answered `-32000` without echoing the uri. The descriptor stayed open, and
-  the next file load closed it before loading. While the close kept failing,
-  over loopback HTTP the next file load answered `-32000` ("still open") and
-  an inline `data` part still loaded. `close()` rejected with the unfinished
-  close, then resolved and closed the descriptor once the close succeeded.
-  Both tests fail on the previous head, which dropped the descriptor.
 - File hosts: `file://remote.example.test/...` and
   `file:////remote.example.test/...` are refused with the network-share
   message and no failure category; a `file://localhost/...` uri loads.

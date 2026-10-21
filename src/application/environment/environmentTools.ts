@@ -203,6 +203,15 @@ const describeResponses = (
   return `${returns} ${describeJson(found.value)}; ${recorded}`;
 };
 
+/** One tool's description: method, path, response summary, what it does, the records it cites and the Evidence. */
+const toolDescription = (
+  source: EnvironmentSource,
+  tool: EnvironmentManifestTool,
+  describe: EnvironmentCatalogOptions["describe"],
+  answers: string,
+): string =>
+  `${REPLAY_CATALOG_INSTRUCTIONS} ${describeText(tool.method, "method")} ${describeText(tool.path_template, "path")}; ${describeResponses(tool, source.exchanges)}; ${describe?.(tool) ?? answers} [${describeList(tool.record_ordinals, tool.record_ordinals.length)}]; evidence ${source.evidenceId}`;
+
 /** Captured argument names longer than this are advertised under a short alias; the manifest keeps the name. */
 export const MAX_ARGUMENT_NAME_CHARS = 64;
 
@@ -328,6 +337,8 @@ export type EnvironmentDataPlane = "none" | "state";
 export interface EnvironmentCatalogOptions {
   readonly operation?: string;
   readonly dataPlane?: EnvironmentDataPlane;
+  /** What a served tool does, in place of how it answers; undefined keeps the answering sentence. */
+  readonly describe?: (tool: EnvironmentManifestTool) => string | undefined;
 }
 
 /** Admit complete discovery before binding; six bytes per UTF-16 unit covers JSON escaping and UTF-8 expansion. */
@@ -337,6 +348,7 @@ export const environmentToolDefinitions = (
   {
     operation = ENVIRONMENT_SERVE_OPERATION,
     dataPlane = "none",
+    describe,
   }: EnvironmentCatalogOptions = {},
 ): Result<
   readonly EnvironmentToolDefinition[],
@@ -392,7 +404,7 @@ export const environmentToolDefinitions = (
     // A lower bound rejects enormous argument lists before constructing their alias map.
     if (!reserve(count * EMPTY_PROPERTY_BYTES)) return refused();
     // The response summary is bounded by its samples and charged with the whole description.
-    const description = `${REPLAY_CATALOG_INSTRUCTIONS} ${describeText(tool.method, "method")} ${describeText(tool.path_template, "path")}; ${describeResponses(tool, source.exchanges)}; ${answers} [${describeList(tool.record_ordinals, tool.record_ordinals.length)}]; evidence ${source.evidenceId}`;
+    const description = toolDescription(source, tool, describe, answers);
     if (!text(description)) return refused();
     const args = environmentToolArguments(tool);
     const properties = new Map<string, EnvironmentToolProperty>();

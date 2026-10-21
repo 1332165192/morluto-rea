@@ -6,6 +6,7 @@ import {
   same,
   scalarText,
   segmentsOf,
+  type JsonObject,
   type StateDocument,
   type StateEntity,
   type StateType,
@@ -15,8 +16,13 @@ import {
   type AnalysisInputIssue,
 } from "../../domain/analysisErrorCore.js";
 import { canonicalJson } from "../../domain/comparisonSemantics.js";
+import { parseExactJson } from "../../domain/exactJsonNumber.js";
 import { projectInputIssues } from "../../domain/inputIssueProjection.js";
-import { jsonValueSchema } from "../../domain/jsonValue.js";
+import {
+  jsonValueSchema,
+  jsonValueValidationIssue,
+  type JsonValue,
+} from "../../domain/jsonValue.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { compositeKey } from "../../domain/unicodeCodePointOrder.js";
 import type { EnvironmentState } from "./environmentState.js";
@@ -133,6 +139,18 @@ const prototypeMemberPath = (root: unknown): Path | undefined => {
   }
   return undefined;
 };
+
+/** Whether `data/add` accepts a value as a `fields` member or a document's `value`: bounded nesting, no `__proto__` member, and numbers exact as `data/get` writes them. */
+export const isLoadableValue = (value: JsonValue): boolean =>
+  jsonValueValidationIssue(value) === undefined &&
+  prototypeMemberPath(value) === undefined &&
+  parseExactJson(JSON.stringify(value)) !== undefined;
+
+/** The first member of an object `data/add` would refuse as `fields`, if any: a `__proto__` member, or one whose value does not load. */
+export const unloadableMember = (object: JsonObject): string | undefined =>
+  Object.keys(object).find(
+    (member) => member === "__proto__" || !isLoadableValue(object[member]!),
+  );
 
 /** The first schema problem, located without naming the caller's data. */
 const schemaProblem = (

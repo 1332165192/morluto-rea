@@ -90,10 +90,6 @@ this increment: write tools are not served from the state.
   download in progress ends with reason `cancelled`, queued calls are answered
   `-32000` with reason `cancelled` without running, and a `data/add` whose
   file read finished after the cancellation does not replace the state.
-- A `file://` read whose descriptor close fails answers `-32000` and keeps the
-  descriptor in a server-lifetime owner. The next file read retries the close
-  first and, while it still fails, answers `-32000` without opening the file.
-  `close` retries it again and rejects while it is still open.
 - Bound one `/agentenv` response to 64 MiB of replies (twice the intake
   limit). Each reply is measured in bounded JSON parts as it is produced, in
   message order, and assembled only when it fits, so a reply past the budget is
@@ -176,8 +172,7 @@ host or a UNC path, injected https downloads (status, declared and streamed
 size, the timeout whether or not the fetcher honours its signal), the default
 fetch's refused redirects, arrival-order application across requests, a batch
 another request's reset cannot split, cancellation by the server's stop and by
-a departed caller, a server that closes while a download is stalled, a
-retained state-file close that the next file read and `close` retry, the
+a departed caller, a server that closes while a download is stalled, the
 response budget, batches and notifications, the card declaration, absent write
 tools, a served query `POST`, the per-mode discovery reservation and a
 `data/add` that changes the next tool answer over MCP. The mcp-boundary tests serve the state the

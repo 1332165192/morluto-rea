@@ -22,7 +22,7 @@ import {
 } from "./environmentBundle.js";
 import type { EnvironmentSource } from "./environmentSource.js";
 import { prepareServedState } from "./environmentState.js";
-import { environmentToolAnswer } from "./environmentStateAnswer.js";
+import { environmentToolAnswer } from "./environmentToolAnswer.js";
 import { EnvironmentStateStore } from "./environmentStateStore.js";
 
 const fixture = environmentServeFixture();
@@ -218,7 +218,9 @@ describe("planEnvironmentBundle", () => {
     expect(readme).not.toContain("agent-env run grafana-example");
     expect(readme).toContain("## What the environment serves");
     expect(readme).not.toContain("What replay means");
-    expect(readme).toContain("write tools are not served yet");
+    expect(readme).toContain(
+      "write tools are served only where the capture's later reads confirmed\ntheir effect",
+    );
     expect(readme).toContain(
       "`rea environment-serve --replay-only` serves pure replay",
     );
@@ -390,7 +392,7 @@ describe("planEnvironmentBundle without a state", () => {
     const reads = servedSource.manifest.tools.filter(
       ({ method }) => method === "GET",
     );
-    const tools = Array.from({ length: 350 }, (_, index) => {
+    const tools = Array.from({ length: 310 }, (_, index) => {
       const tool = reads[index % reads.length]!;
       return index < reads.length
         ? tool
@@ -416,7 +418,7 @@ describe("planEnvironmentBundle without a state", () => {
       served: false,
       code: "resource_constraint",
     });
-    expect(planned.value.toolCount).toBe(350);
+    expect(planned.value.toolCount).toBe(310);
     expect(planned.value.check).toEqual({
       tool: "get_annotations",
       recordOrdinal: 25,

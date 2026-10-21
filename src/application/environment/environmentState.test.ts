@@ -24,6 +24,7 @@ import {
 } from "../analysisView/AnalysisViewService.js";
 import { loadEnvironmentSource } from "./environmentSource.js";
 import {
+  admitServedState,
   deriveEnvironmentState,
   loadEnvironmentState,
   prepareServedState,
@@ -272,6 +273,28 @@ describe("prepareServedState", () => {
   });
 });
 
+describe("admitServedState", () => {
+  it("refuses a derived state data/get would write past what data/add loads back", () => {
+    expect(admitServedState(state, "environment_serve").ok).toBe(true);
+    // A euro sign is one UTF-16 unit but three bytes as data/get writes it.
+    const notes = "\u20ac".repeat(12_000_000);
+    const [first] = state.entities;
+    const large = {
+      ...state,
+      entities: [
+        ...state.entities,
+        { ...first!, id: "large", fields: { ...first!.fields, notes } },
+      ],
+    };
+    const admitted = admitServedState(large, "environment_serve");
+    if (admitted.ok) throw new Error("Expected the state to be refused");
+    expect(projectAnalysisError(admitted.error)).toMatchObject({
+      code: "resource_constraint",
+      message: expect.stringContaining("larger than data/add loads"),
+    });
+  });
+});
+
 describe("EnvironmentStateStore", () => {
   it("reports its state as rea-state/v1, accepts that report back and resets to the initial state", () => {
     const store = new EnvironmentStateStore(state);
@@ -461,12 +484,12 @@ describe("rea-state/v1 validation", () => {
       "a document for a tool that is not a document view",
       (document: Editable) => {
         document.rea_state.documents.push({
-          tool: "get_org",
-          path: "/api/org",
+          tool: "get_users_by_id",
+          path: "/api/users/2",
           value: {},
         });
       },
-      "rea_state/documents/0/tool",
+      `rea_state/documents/${String(state.documents.length)}/tool`,
     ],
     [
       "a member the format does not define",

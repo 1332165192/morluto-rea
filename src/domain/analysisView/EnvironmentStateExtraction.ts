@@ -53,6 +53,7 @@ import {
   type StatePlan,
 } from "./environmentStateGate.js";
 import { StateWriteCutoffs } from "./environmentStateWriteCutoffs.js";
+import { extractWrites } from "./environmentStateWrites.js";
 
 class StateBudgetExhausted extends Error {}
 
@@ -73,6 +74,7 @@ const requestLine = (record: StateRecordFacts): string =>
 /** Derive the init state and render plans from manifest tools and timeline-ordered records. */
 export class EnvironmentStateExtraction {
   readonly #tools: readonly StateToolFacts[];
+  readonly #records: readonly StateRecordFacts[];
   readonly #timeline: StateTimeline;
   readonly #budget: StateBudget;
   readonly #position: ReadonlyMap<number, number>;
@@ -103,6 +105,7 @@ export class EnvironmentStateExtraction {
     readonly budget: StateBudget;
   }) {
     this.#tools = input.tools;
+    this.#records = input.records;
     this.#timeline = input.timeline;
     this.#budget = input.budget;
     this.#position = new Map(
@@ -145,11 +148,36 @@ export class EnvironmentStateExtraction {
             plan.tool.name,
             plan.item ? checkItemPlan(gate, plan) : checkListPlan(gate, plan),
           );
-      return this.#result(this.#documents(candidates));
+      return this.#withWrites(this.#result(this.#documents(candidates)));
     } catch (cause: unknown) {
       if (cause instanceof StateBudgetExhausted) return null;
       throw cause;
     }
+  }
+
+  /** The write plans the capture's own timeline confirms against the extracted state. */
+  #withWrites(
+    state: Omit<ExtractedState, "writes" | "write_clock">,
+  ): ExtractedState {
+    return {
+      ...state,
+      ...extractWrites(state, {
+        tools: this.#tools,
+        records: this.#records,
+        timed: this.#timeline === "recorded-start-time",
+        volatileOf: (type) => this.#volatileOf(type),
+        io: {
+          withBody: (ordinal, use) => this.#withBody(ordinal, use),
+          requestBody: (ordinal) => {
+            const parsed = this.#budget.requestBody(ordinal);
+            if (parsed === null) throw new StateBudgetExhausted();
+            return parsed.kind === "json" ? parsed.value : undefined;
+          },
+          emptyResponse: (ordinal) => this.#budget.emptyResponse(ordinal),
+          retain: (bytes) => this.#retain(bytes),
+        },
+      }),
+    };
   }
 
   #retain(bytes: number): void {
@@ -572,7 +600,9 @@ export class EnvironmentStateExtraction {
   }
 
   /** Types and entities that at least one state-backed view renders; view values only for those views. */
-  #result(documents: StateDocument[]): ExtractedState {
+  #result(
+    documents: StateDocument[],
+  ): Omit<ExtractedState, "writes" | "write_clock"> {
     const backed = new Set<string>();
     const backedTypes = new Set<string>();
     for (const view of this.#views.values())

@@ -20,9 +20,9 @@ import {
 
 const HTTP_BOUNDARY_TIMEOUT_MS = 90_000;
 const CARD_PATH = "/.well-known/agent-env.json";
-/** SHA-256 of the 11,131-byte card main serves for the fixture named "renamed"; pure replay must serve the same bytes. */
+/** SHA-256 of the 12,818-byte replay card for the fixture named "renamed", with the response summaries tool descriptions carry; pure replay must serve these bytes. */
 const MAIN_REPLAY_CARD_SHA256 =
-  "f12f16011feb5f675b2bbf6a04a8b28a2ed8041074e4fe188cf74e7a66b15207";
+  "7c65ab63f0c00ce79b570024c4611c225729677b44fc49bbde32b2d65f868961";
 
 /** Serve the fixture pair as pure replay through the built CLI. */
 const serveReplayOnly = async (
