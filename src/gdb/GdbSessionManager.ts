@@ -15,6 +15,7 @@ import {
   type AnalysisErrorOptions,
 } from "../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
+import type { GdbCommandResult } from "../domain/commandObservation.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   ProviderProcessSupervisor,
@@ -30,7 +31,7 @@ import {
   type ProcessStartTimeReader,
   verifyOwnedInferiorsEnded,
 } from "../process/ownedDebuggerSession.js";
-import { parseLinuxProcessStartTime } from "../process/ProcessOwnershipObservation.js";
+import { parseLinuxProcessStat } from "../process/LinuxProcessStat.js";
 
 const STARTUP_TIMEOUT_MS = 10_000;
 const COMMAND_TIMEOUT_MS = 120_000;
@@ -42,6 +43,30 @@ const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 const DEFAULT_MAX_SESSIONS = 8;
 const MAX_PENDING_GDB_COMMANDS = 16;
 const RECENT_RECORD_TRUNCATION_MARKER = "[recent record truncated]";
+
+const cancelledWithCallerReason = (
+  operation: string,
+  signal: AbortSignal,
+  previous?: AnalysisCancelledError,
+): AnalysisCancelledError => {
+  const cancellation = new AnalysisCancelledError(operation, {
+    cause: signal.reason,
+    cleanupPrimary: previous,
+    ...(previous?.diagnostics === undefined
+      ? {}
+      : { diagnostics: previous.diagnostics }),
+    ...(previous?.capturedOutput === undefined
+      ? {}
+      : { capturedOutput: previous.capturedOutput }),
+    ...(previous?.cleanup === undefined ? {} : { cleanup: previous.cleanup }),
+    ...(previous?.partialObservation === undefined
+      ? {}
+      : { partialObservation: previous.partialObservation }),
+  });
+  if (previous?.cleanupIncomplete)
+    cancellation.bindCleanupDependencies([previous]);
+  return cancellation;
+};
 
 export const GDB_PROVIDER_IDENTITY = {
   id: "gnu.gdb",
@@ -63,21 +88,6 @@ interface PendingCommand {
   readonly reject: (error: Error) => void;
   readonly cleanup: () => void;
   timer: ReturnType<typeof setTimeout>;
-}
-
-export interface GdbCommandResult {
-  readonly command: string;
-  readonly mi: string;
-  readonly records: readonly string[];
-  readonly console: string;
-  readonly target: string;
-  readonly log: string;
-  readonly process_exit_observed?: boolean;
-  readonly process_exit_code?: number | null;
-  readonly process_exit_signal?: NodeJS.Signals | null;
-  readonly output_truncated: boolean;
-  readonly completion_status: "complete" | "unknown";
-  readonly output_invalid_utf8?: true;
 }
 
 class GdbCommandTimeoutError extends AnalysisTimeoutError {
@@ -105,13 +115,193 @@ const truncateUtf8RecordPrefix = (line: string): string => {
   return `${prefix}${RECENT_RECORD_TRUNCATION_MARKER}`;
 };
 
+/** Bound parser memory when a capped MI record contains extreme nesting. */
+const MAX_GDB_MI_NESTED_VALUE_FRAMES = 256;
+
+/** Parse a complete MI result record and retain the unique top-level groups list span. */
+const gdbMiGroupsListSpan = (
+  mi: string,
+): { readonly start: number; readonly end: number } | undefined => {
+  const prefix = /^(?:\d+)?\^done/u.exec(mi)?.[0];
+  if (prefix === undefined) return undefined;
+  const isNameCharacter = (character: string | undefined): boolean =>
+    character !== undefined &&
+    !/[=,{}[\]"\s]/u.test(character) &&
+    character.charCodeAt(0) >= 0x20;
+  const readName = (start: number): number => {
+    if (!isNameCharacter(mi[start])) return start;
+    let cursor = start;
+    while (isNameCharacter(mi[cursor])) cursor += 1;
+    return cursor;
+  };
+  const readString = (start: number): number | undefined => {
+    for (let cursor = start + 1; cursor < mi.length; cursor += 1) {
+      const character = mi[cursor];
+      if (character === '"') return cursor + 1;
+      if (character === "\\") {
+        cursor += 1;
+        const escaped = mi[cursor];
+        if (escaped === undefined) return undefined;
+        if (escaped === "x") {
+          const startHex = cursor + 1;
+          cursor = startHex;
+          while (/[0-9a-f]/iu.test(mi[cursor] ?? "")) cursor += 1;
+          if (cursor === startHex) return undefined;
+          cursor -= 1;
+        } else if (/[0-7]/u.test(escaped)) {
+          let digits = 1;
+          while (digits < 3 && /[0-7]/u.test(mi[cursor + 1] ?? "")) {
+            cursor += 1;
+            digits += 1;
+          }
+        } else if (!/^[abfnrtv\\'"?]$/u.test(escaped)) return undefined;
+      } else if (mi.charCodeAt(cursor) < 0x20) return undefined;
+    }
+    return undefined;
+  };
+  const stack: {
+    readonly kind: "list" | "tuple";
+    readonly close: "]" | "}";
+    readonly groupInventory: boolean;
+    readonly groupStart: number | undefined;
+    readonly groupTuple: boolean;
+    phase: "first" | "afterComma" | "afterItem";
+    listItems: "result" | "value" | undefined;
+    groupIdSeen: boolean;
+  }[] = [];
+  let groupSpan: { start: number; end: number } | undefined;
+  let groupSeen = false;
+  let cursor = prefix.length;
+  let valueStart = -1;
+  let pendingGroupList = false;
+
+  const completeValue = (): void => {
+    const parent = stack.at(-1);
+    if (parent !== undefined) parent.phase = "afterItem";
+  };
+
+  const beginValue = (): boolean => {
+    const character = mi[cursor];
+    if (pendingGroupList && character !== "[") return false;
+    if (character === '"') {
+      const end = readString(cursor);
+      if (end === undefined) return false;
+      cursor = end;
+      completeValue();
+      return true;
+    }
+    if (character === "[" || character === "{") {
+      const kind = character === "[" ? "list" : "tuple";
+      const groupInventory = pendingGroupList;
+      if (groupInventory && kind !== "list") return false;
+      if (stack.length >= MAX_GDB_MI_NESTED_VALUE_FRAMES) return false;
+      const parent = stack.at(-1);
+      const groupTuple = kind === "tuple" && parent?.groupInventory === true;
+      pendingGroupList = false;
+      cursor += 1;
+      stack.push({
+        kind,
+        close: kind === "list" ? "]" : "}",
+        groupInventory,
+        groupStart: groupInventory ? valueStart : undefined,
+        groupTuple,
+        phase: "first",
+        listItems: undefined,
+        groupIdSeen: false,
+      });
+      return true;
+    }
+    return false;
+  };
+
+  while (true) {
+    const frame = stack.at(-1);
+    if (frame === undefined) {
+      if (cursor === mi.length) break;
+      if (mi[cursor] !== ",") return undefined;
+      cursor += 1;
+      const nameEnd = readName(cursor);
+      if (nameEnd === cursor || mi[nameEnd] !== "=") return undefined;
+      const name = mi.slice(cursor, nameEnd);
+      if (name === "groups") {
+        if (groupSeen) return undefined;
+        groupSeen = true;
+        valueStart = nameEnd + 1;
+        pendingGroupList = true;
+      }
+      cursor = nameEnd + 1;
+      if (!beginValue()) return undefined;
+      continue;
+    }
+
+    if (frame.phase === "afterItem") {
+      if (mi[cursor] === ",") {
+        cursor += 1;
+        frame.phase = "afterComma";
+        continue;
+      }
+      if (mi[cursor] !== frame.close) return undefined;
+      if (frame.groupTuple && !frame.groupIdSeen) return undefined;
+      cursor += 1;
+      stack.pop();
+      if (frame.groupInventory) {
+        if (frame.groupStart === undefined) return undefined;
+        groupSpan = { start: frame.groupStart, end: cursor };
+      }
+      completeValue();
+      continue;
+    }
+
+    if (frame.phase === "first" && mi[cursor] === frame.close) {
+      if (frame.groupTuple && !frame.groupIdSeen) return undefined;
+      cursor += 1;
+      stack.pop();
+      if (frame.groupInventory) {
+        if (frame.groupStart === undefined) return undefined;
+        groupSpan = { start: frame.groupStart, end: cursor };
+      }
+      completeValue();
+      continue;
+    }
+    if (frame.phase === "first" || frame.phase === "afterComma") {
+      if (frame.kind === "tuple") {
+        const nameEnd = readName(cursor);
+        if (nameEnd === cursor || mi[nameEnd] !== "=") return undefined;
+        if (frame.groupTuple && mi.slice(cursor, nameEnd) === "id") {
+          if (frame.groupIdSeen || mi[nameEnd + 1] !== '"') return undefined;
+          frame.groupIdSeen = true;
+        }
+        cursor = nameEnd + 1;
+        if (!beginValue()) return undefined;
+        continue;
+      }
+
+      const nameEnd = readName(cursor);
+      const itemIsResult = nameEnd > cursor && mi[nameEnd] === "=";
+      const itemKind = itemIsResult ? "result" : "value";
+      if (frame.listItems !== undefined && frame.listItems !== itemKind)
+        return undefined;
+      frame.listItems = itemKind;
+      if (frame.groupInventory && (itemIsResult || mi[cursor] !== "{"))
+        return undefined;
+      if (itemIsResult) cursor = nameEnd + 1;
+      if (!beginValue()) return undefined;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  return groupSpan;
+};
+
 /** @internal Pure parser for live PIDs in recursive GDB MI thread groups. */
 export const gdbThreadGroupPids = (
   mi: string,
 ): readonly string[] | undefined => {
-  const marker = mi.indexOf("groups=[");
-  if (marker < 0) return undefined;
-  const start = marker + "groups=[".length;
+  const groupsSpan = gdbMiGroupsListSpan(mi);
+  if (groupsSpan === undefined) return undefined;
+  const start = groupsSpan.start + 1;
   let squareDepth = 1;
   let objectDepth = 0;
   let quoted = false;
@@ -138,6 +328,11 @@ export const gdbThreadGroupPids = (
       }
       continue;
     }
+    if (
+      (mi[index - 1] === "{" || mi[index - 1] === ",") &&
+      mi.startsWith("groups=", index)
+    )
+      return undefined;
     if (character === '"') {
       if (
         squareDepth === 1 &&
@@ -154,9 +349,7 @@ export const gdbThreadGroupPids = (
     else if (character === "]") {
       squareDepth -= 1;
       if (squareDepth === 0) {
-        if (objectDepth !== 0) return undefined;
-        const body = mi.slice(start, index);
-        if (body.includes("groups=[")) return undefined;
+        if (objectDepth !== 0 || index + 1 !== groupsSpan.end) return undefined;
         return pids;
       }
     } else if (character === "{") {
@@ -204,7 +397,10 @@ const verifyGdbInferiorOutputSink = async (
       "GDB cannot confirm live inferior output descriptors outside Linux /proc.",
     );
   const statPath = `/proc/${pid}/stat`;
-  const before = parseLinuxProcessStartTime(await readFile(statPath, "utf8"));
+  const expectedPid = Number(pid);
+  const beforeStat = parseLinuxProcessStat(await readFile(statPath, "utf8"));
+  const before =
+    beforeStat?.pid === expectedPid ? beforeStat.startTime : undefined;
   if (before === undefined)
     throw new Error("GDB could not establish the live inferior identity.");
   const ttyPath = await realpath(selectedTty);
@@ -225,7 +421,9 @@ const verifyGdbInferiorOutputSink = async (
         `GDB inferior descriptor ${descriptor} no longer points to the selected TTY.`,
       );
   }
-  const after = parseLinuxProcessStartTime(await readFile(statPath, "utf8"));
+  const afterStat = parseLinuxProcessStat(await readFile(statPath, "utf8"));
+  const after =
+    afterStat?.pid === expectedPid ? afterStat.startTime : undefined;
   if (after !== before)
     throw new Error(
       "The GDB inferior identity changed during descriptor readback.",
@@ -384,7 +582,11 @@ export class GdbSessionManager {
         ]),
       );
     if (this.#closing || signal?.aborted)
-      return err(new AnalysisCancelledError("start_gdb_session"));
+      return err(
+        signal?.aborted
+          ? cancelledWithCallerReason("start_gdb_session", signal)
+          : new AnalysisCancelledError("start_gdb_session"),
+      );
     if (this.#platform !== "linux")
       return err(
         new AnalysisCapabilityUnavailableError(
@@ -396,7 +598,12 @@ export class GdbSessionManager {
         ),
       );
     const controller = new AbortController();
-    const relayAbort = (): void => controller.abort(signal?.reason);
+    let callerAbortWon = false;
+    const relayAbort = (): void => {
+      if (controller.signal.aborted) return;
+      callerAbortWon = true;
+      controller.abort(signal?.reason);
+    };
     signal?.addEventListener("abort", relayAbort, { once: true });
     if (signal?.aborted) relayAbort();
     const tracked = Promise.resolve()
@@ -406,7 +613,20 @@ export class GdbSessionManager {
         this.#activeStarts.delete(controller);
       });
     this.#activeStarts.set(controller, tracked);
-    return tracked;
+    return tracked.then((result) =>
+      !result.ok &&
+      result.error instanceof AnalysisCancelledError &&
+      callerAbortWon &&
+      signal !== undefined
+        ? err(
+            cancelledWithCallerReason(
+              "start_gdb_session",
+              signal,
+              result.error,
+            ),
+          )
+        : result,
+    );
   }
 
   async #startWithReservation(
@@ -500,7 +720,10 @@ export class GdbSessionManager {
       };
       launched = await this.#spawnProcess(spawnOptions);
     } catch (cause) {
-      if (signal?.aborted || cause instanceof AnalysisCancelledError)
+      if (
+        (signal?.aborted && cause === signal.reason) ||
+        cause instanceof AnalysisCancelledError
+      )
         return err(new AnalysisCancelledError("start_gdb_session", { cause }));
       return err(
         new AnalysisCapabilityUnavailableError(
@@ -620,7 +843,6 @@ export class GdbSessionManager {
         );
         startupTimer.unref();
       });
-      session.ready = true;
       if (signal?.aborted)
         throw new AnalysisCancelledError("start_gdb_session");
       const autoLoad = await this.#request(
@@ -685,8 +907,11 @@ export class GdbSessionManager {
         throw new Error(
           session.protocolError ?? "GDB exited during startup readiness.",
         );
-      // Before this point no target command can run. Once a usable session is
-      // published, the inferior state is no longer inferred from startup phase.
+      // Publish readiness only after every mandatory startup check completes.
+      // Retained failed-start owners remain addressable for cleanup, not work.
+      session.ready = true;
+      // Before publication no target command can run. Once usable, the
+      // inferior state is no longer inferred from startup phase.
       session.noInferiorVerified = false;
       this.#sessions.set(id, session);
       releaseReservation();
@@ -793,6 +1018,16 @@ export class GdbSessionManager {
       if (stopped.status === "incomplete") {
         this.#sessions.set(id, session);
         releaseReservation();
+        const cleanupFailure = this.#retainCleanupFailure(
+          session,
+          "start_gdb_session",
+          stopped.reason,
+          { cause },
+        );
+        const retainCleanup = <T extends AnalysisError>(failure: T): T =>
+          failure.bindCleanupDependencies([cleanupFailure], {
+            cleanupResources: [session.id],
+          });
         const cleanup = { reason: stopped.reason, resources: [session.id] };
         const details = {
           cause,
@@ -804,17 +1039,27 @@ export class GdbSessionManager {
         };
         if (cause instanceof AnalysisTimeoutError)
           return err(
-            new AnalysisTimeoutError(cause.operation, cause.timeoutMs, details),
+            retainCleanup(
+              new AnalysisTimeoutError(
+                cause.operation,
+                cause.timeoutMs,
+                details,
+              ),
+            ),
           );
         if (cause instanceof AnalysisCancelledError)
-          return err(new AnalysisCancelledError(cause.operation, details));
+          return err(
+            retainCleanup(new AnalysisCancelledError(cause.operation, details)),
+          );
         const startupFailureMessage = gdbErrorMessage(cause);
         return err(
-          new AnalysisCapabilityUnavailableError(
-            "gdb",
-            "start_gdb_session",
-            `GDB startup failed (${startupFailureMessage}) and its owned process could not be confirmed stopped: ${stopped.reason}`,
-            details,
+          retainCleanup(
+            new AnalysisCapabilityUnavailableError(
+              "gdb",
+              "start_gdb_session",
+              `GDB startup failed (${startupFailureMessage}) and its owned process could not be confirmed stopped: ${stopped.reason}`,
+              details,
+            ),
           ),
         );
       }
@@ -826,7 +1071,7 @@ export class GdbSessionManager {
           : { partialObservation: startupEvidence }),
       };
       const error =
-        signal?.aborted || cause instanceof AnalysisCancelledError
+        cause instanceof AnalysisCancelledError
           ? new AnalysisCancelledError("start_gdb_session", errorDetails)
           : cause instanceof AnalysisTimeoutError
             ? new AnalysisTimeoutError(
@@ -890,7 +1135,8 @@ export class GdbSessionManager {
           },
         ]),
       );
-    if (signal?.aborted) return err(new AnalysisCancelledError("gdb_console"));
+    if (signal?.aborted)
+      return err(cancelledWithCallerReason("gdb_console", signal));
     try {
       const completed = await this.#serialize(
         session,
@@ -1133,14 +1379,18 @@ export class GdbSessionManager {
               );
             if (groupCount > 0 && !session.inferiorTtyVerified)
               return err(
-                new AnalysisInputError("close_gdb_session", undefined, [
+                new AnalysisCapabilityUnavailableError(
+                  GDB_PROVIDER_IDENTITY.id,
+                  "close_gdb_session",
+                  "Live GDB inferiors require an explicit disposition because no durable inferior TTY is verified.",
                   {
-                    path: ["session_id"],
-                    reason: "invalid_value",
-                    message:
-                      "Live GDB thread groups remain and no verified durable inferior TTY is configured. Select a safe disposition through the GDB console or restart with inferior_tty before closing.",
+                    retryable: true,
+                    userMessage:
+                      "Close requires an explicit inferior disposition.",
+                    remediationAction:
+                      "Use gdb_console with this session_id to explicitly detach or terminate each remaining inferior, then retry close_gdb_session.",
                   },
-                ]),
+                ),
               );
             if (groupCount === 0) {
               session.noInferiorVerified = true;
@@ -1855,28 +2105,51 @@ export class GdbSessionManager {
           "A GDB MI command was cancelled; owned-session shutdown was requested because output correlation can no longer be guaranteed.";
         void this.#stopDebuggerOnly(session).then(
           (stopped) => {
-            pending.reject(
-              stopped.status === "incomplete"
-                ? new AnalysisCancelledError("gdb_console", {
-                    cause: new Error(stopped.reason),
-                    cleanup: {
-                      reason: stopped.reason,
-                      resources: [session.id],
-                    },
-                    partialObservation: evidence,
-                  })
-                : new AnalysisCancelledError("gdb_console", {
-                    partialObservation: evidence,
-                  }),
+            if (stopped.status !== "incomplete") {
+              pending.reject(
+                new AnalysisCancelledError("gdb_console", {
+                  cause: signal?.reason,
+                  partialObservation: evidence,
+                }),
+              );
+              return;
+            }
+            const cleanupFailure = this.#retainCleanupFailure(
+              session,
+              "gdb_console",
+              stopped.reason,
             );
-          },
-          (cause: unknown) =>
             pending.reject(
               new AnalysisCancelledError("gdb_console", {
-                cause,
+                cause: signal?.reason,
+                cleanup: {
+                  reason: stopped.reason,
+                  resources: [session.id],
+                },
                 partialObservation: evidence,
+              }).bindCleanupDependencies([cleanupFailure], {
+                cleanupResources: [session.id],
               }),
-            ),
+            );
+          },
+          (cause: unknown) => {
+            const reason = gdbErrorMessage(cause);
+            const cleanupFailure = this.#retainCleanupFailure(
+              session,
+              "gdb_console",
+              reason,
+              { cause },
+            );
+            pending.reject(
+              new AnalysisCancelledError("gdb_console", {
+                cause: signal?.reason,
+                cleanup: { reason, resources: [session.id] },
+                partialObservation: evidence,
+              }).bindCleanupDependencies([cleanupFailure], {
+                cleanupResources: [session.id],
+              }),
+            );
+          },
         );
       };
       signal?.addEventListener("abort", abortListener, { once: true });
@@ -2031,17 +2304,21 @@ export const commandMayChangeInferiorOutput = (command: string): boolean => {
   );
 };
 
-/** Terminate only the directly owned debugger process, never its process group or inferiors. */
+/** Await a serialized command turn, preserving the caller's cancellation reason. */
 export const waitForGdbCommandTurn = (
   previous: Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> => {
   if (signal === undefined) return previous;
   if (signal.aborted)
-    return Promise.reject(new AnalysisCancelledError("gdb_console"));
+    return Promise.reject(
+      new AnalysisCancelledError("gdb_console", { cause: signal.reason }),
+    );
   return new Promise<void>((resolve, reject) => {
     const onAbort = (): void =>
-      reject(new AnalysisCancelledError("gdb_console"));
+      reject(
+        new AnalysisCancelledError("gdb_console", { cause: signal.reason }),
+      );
     signal.addEventListener("abort", onAbort, { once: true });
     previous.then(
       () => {

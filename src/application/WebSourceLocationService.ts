@@ -34,6 +34,7 @@ import type {
   WebSourceLocationArtifactPort,
   WebSourceMapPort,
 } from "./WebSourceLocationPorts.js";
+import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 
 const OPERATION = "trace_web_source_location";
 const artifactsSchema = selectedWebScriptArtifactsSchema.extend({
@@ -87,7 +88,9 @@ export class WebSourceLocationService {
     options?: ExecutionOptions,
   ): Promise<Result<Evidence, AnalysisError>> {
     if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const parsed = webSourceLocationInputSchema.safeParse(rawInput);
     if (!parsed.success)
       return err(
@@ -113,7 +116,9 @@ export class WebSourceLocationService {
     if (!pairing.ok) return pairing;
     const generatedOffset = pairing.value;
     if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const traced = await this.decoder.trace(
       {
         text: map.text,
@@ -126,8 +131,6 @@ export class WebSourceLocationService {
     if (!traced.ok) return traced;
     const report = verifyReport(input, map.file.sha256, traced.value);
     if (!report.ok) return report;
-    if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
     const limitations = [
       ...LIMITATIONS,
       codecBudgetLimitation(report.value.runtime),
@@ -147,7 +150,7 @@ export class WebSourceLocationService {
       limitations,
     });
     if (!normalized.success) return invalidOutput(normalized.error.message);
-    return ok(
+    return completeProviderEvidence(
       createEvidence(
         {
           path: data.sourceFile.path,
@@ -178,6 +181,7 @@ export class WebSourceLocationService {
               : [data.manifest.source_evidence_id],
         },
       ),
+      options?.signal,
     );
   }
 }

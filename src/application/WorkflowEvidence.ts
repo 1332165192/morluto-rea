@@ -23,7 +23,12 @@ import {
 import type { JsonValue } from "../domain/jsonValue.js";
 import type { UnknownRegistryPort } from "./investigation/InvestigationRecordPort.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
-import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import { workflowUnknownInput } from "./investigation/WorkflowUnknown.js";
+import {
+  renderSourceLimitations,
+  sourceLimitationKey,
+  type SourceLimitation,
+} from "./SourceLimitations.js";
 
 /** Retain the limits of exactly the observations used by one composed call. */
 export const executeComposedWorkflow = async (
@@ -33,25 +38,38 @@ export const executeComposedWorkflow = async (
   ) => Promise<Result<JsonValue, AnalysisError>>,
 ): Promise<
   Result<
-    { readonly result: JsonValue; readonly limitations: readonly string[] },
+    {
+      readonly result: JsonValue;
+      readonly limitations: readonly string[];
+      readonly cachePolicy?: "live";
+    },
     AnalysisError
   >
 > => {
-  const limitations = new Set<string>();
+  const limitations = new Map<string, SourceLimitation>();
+  let cachePolicy: "live" | undefined;
   const result = await execute({
     execute: async (operation, parameters, options) => {
       const execution = await analysis.execute(operation, parameters, options);
+      if (execution.ok && execution.value.cachePolicy === "live")
+        cachePolicy = "live";
       if (execution.ok)
-        execution.value.limitations.forEach((limitation) =>
-          limitations.add(limitation),
-        );
+        for (const limitation of execution.value.limitations) {
+          const fact = {
+            provider: execution.value.provider,
+            operation,
+            limitation,
+          } satisfies SourceLimitation;
+          limitations.set(sourceLimitationKey(fact), fact);
+        }
       return execution;
     },
   });
   if (!result.ok) return result;
   return ok({
     result: result.value,
-    limitations: [...limitations].sort(compareUnicodeCodePoints),
+    limitations: renderSourceLimitations([...limitations.values()]),
+    ...(cachePolicy === undefined ? {} : { cachePolicy }),
   });
 };
 
@@ -115,10 +133,18 @@ const batchProcedureLocations = (result: JsonValue): EvidenceLocation[] => {
 export const workflowSnapshotRecord = (
   evidence: Evidence,
   operation: AnalysisOperation,
+  bindingProfile: AnalysisProfileCommitment | undefined,
+  cachePolicy?: "live",
 ): WorkflowSnapshotRecordInput | undefined => {
-  if (evidence.analysis_profile === null) return undefined;
+  if (
+    evidence.analysis_profile === null ||
+    bindingProfile === undefined ||
+    cachePolicy === "live"
+  )
+    return undefined;
   return {
     operation,
+    bindingProfile,
     parameters: evidence.parameters,
     execution: {
       result: evidence.normalized_result,
@@ -171,12 +197,10 @@ export const recordWorkflowUnknowns = ({
     return { ok: true, value: null };
   for (const question of result.residual_unknowns) {
     if (typeof question !== "string") continue;
-    const recorded = recordUnknown({
+    const input = workflowUnknownInput(evidenceId, {
       question,
       severity: "medium",
       domain: name === "inspect_native_api" ? "native-api" : "control-flow",
-      supporting_evidence_ids: [evidenceId],
-      contradicting_evidence_ids: [],
       required_authority: "shipped-artifact",
       required_confidence: "observed",
       required_environment: null,
@@ -191,6 +215,8 @@ export const recordWorkflowUnknowns = ({
       ],
       relationships: [],
     });
+    if (!input.ok) return input;
+    const recorded = recordUnknown(input.value);
     if (
       !recorded.ok &&
       !(

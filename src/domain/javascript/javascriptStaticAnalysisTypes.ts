@@ -1,7 +1,7 @@
 import type { ElectronStaticFindings } from "./electronStaticAnalysisTypes.js";
 
 /** Token semantics shared by bundle producers and worker admission. */
-export const JAVASCRIPT_AST_FINGERPRINT_ALGORITHM = "babel-ast-v2";
+export const JAVASCRIPT_AST_FINGERPRINT_ALGORITHM = "babel-ast-v3";
 
 /** Static syntax context retained for later artifact path resolution. */
 export type JavaScriptStaticPathContext =
@@ -47,13 +47,15 @@ export interface JavaScriptStaticEndpoint {
   readonly mechanism: string;
   /** An overloaded callee name suggests this value; its network receiver is unproven. */
   readonly interpretation?: "candidate";
+  /** The request target is unresolved source text rather than an exact value. */
+  readonly resolution?: "partial";
   readonly module_key: string | null;
   /** Recovered factory runtime; absent in older or unbundled findings. */
   readonly module_runtime?: string;
   readonly location: JavaScriptSourceRange;
 }
 
-/** A storage surface observed without executing application code. */
+/** A storage API or explicitly uncertain candidate, without executing source. */
 export interface JavaScriptStaticStorage {
   readonly kind:
     | "local-storage"
@@ -61,6 +63,7 @@ export interface JavaScriptStaticStorage {
     | "indexed-db"
     | "cache-storage"
     | "sqlite";
+  readonly interpretation?: "candidate";
   readonly name: string | null;
   readonly mechanism: string;
   readonly module_key: string | null;

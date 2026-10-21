@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AnalysisCancelledError } from "../analysisErrorCore.js";
 
 import {
   compatibleSlice,
@@ -16,6 +17,7 @@ import {
 import {
   DYLIB_RESOLUTION_LIMITATIONS,
   deriveFindings,
+  isLazyLoadCommand,
   type TracedRootSlice,
 } from "./dylibResolutionFindings.js";
 
@@ -45,19 +47,28 @@ const dependencyCommandSchema = z.enum([
   "LC_LOAD_WEAK_DYLIB",
   "LC_REEXPORT_DYLIB",
   "LC_LAZY_LOAD_DYLIB",
+  "LC_LAZY_LOAD_DYLIB_INFO",
   "LC_LOAD_UPWARD_DYLIB",
 ]);
 
 const dependencySchema = z.strictObject({
   command: dependencyCommandSchema,
-  encoding: z.enum(["dylib_command", "dylib_use_command"]),
+  encoding: z.enum([
+    "dylib_command",
+    "dylib_use_command",
+    "lazy_load_dylib_info",
+  ]),
   install_name: z.string(),
   weak: z.boolean(),
   upward: z.boolean(),
   reexport: z.boolean(),
   delayed_init: z.boolean(),
-  current_version: z.string(),
-  compatibility_version: z.string(),
+  /**
+   * Null for `lazy_load_dylib_info`: that payload has no version fields.
+   * Classic dylib commands still carry both versions.
+   */
+  current_version: z.string().nullable(),
+  compatibility_version: z.string().nullable(),
 });
 
 /** Observed dylib-loading facts of one Mach-O slice. */
@@ -103,6 +114,8 @@ export type DylibTreeEntry =
 
 /** Read-only, lazily probed view of the analyzed root. Paths are root-relative. */
 export interface DylibTreeView {
+  /** Map an absolute source path only when it is spelled beneath this root. */
+  rootRelativePath(absolutePath: string): string | undefined;
   entry(path: string): Promise<DylibTreeEntry | undefined>;
   image(path: string): Promise<MachoImageFacts>;
 }
@@ -241,6 +254,24 @@ interface CandidateTemplate {
   readonly rpathOwner: string | null;
 }
 
+const expandCandidatePath = (
+  raw: string,
+  ownerDirectory: string,
+  context: ProcessContext,
+): Expansion =>
+  expandPrefix(raw, {
+    ownerDirectory,
+    executable: context.executable,
+    rootRelativePath: (absolutePath) =>
+      context.view.rootRelativePath(absolutePath),
+  });
+
+const appendRpath = (base: string, rest: string): string => {
+  if (base === "") return rest;
+  if (base === "/") return `/${rest}`;
+  return `${base.replace(/\/+$/u, "")}/${rest}`;
+};
+
 const candidateTemplates = (
   dependency: MachoDependency,
   loader: string,
@@ -255,10 +286,7 @@ const candidateTemplates = (
         : "literal";
     return [
       {
-        expansion: expandPrefix(name, {
-          ownerDirectory: directoryOf(loader),
-          executable: context.executable,
-        }),
+        expansion: expandCandidatePath(name, directoryOf(loader), context),
         source,
         rpath: null,
         rpathOwner: null,
@@ -269,16 +297,17 @@ const candidateTemplates = (
   const owners = [...(context.loaded.get(loader)?.chain ?? [loader])].reverse();
   return owners.flatMap((owner) =>
     (context.loaded.get(owner)?.slice.rpaths ?? []).map((rpath) => {
-      const base = expandPrefix(rpath, {
-        ownerDirectory: directoryOf(owner),
-        executable: context.executable,
-      });
+      const base = expandCandidatePath(rpath, directoryOf(owner), context);
+      const lookupPath = base.scope === "target" ? base.lookupPath : undefined;
       const expansion: Expansion = {
         scope: base.scope,
         path:
-          base.scope === "outside"
-            ? `${base.path.replace(/\/+$/u, "")}/${rest}`
+          base.scope === "outside" || lookupPath !== undefined
+            ? appendRpath(base.path, rest)
             : `${base.path}${base.path === "" ? "" : "/"}${rest}`,
+        ...(lookupPath === undefined
+          ? {}
+          : { lookupPath: appendRpath(lookupPath, rest) }),
       };
       return { expansion, source: "rpath" as const, rpath, rpathOwner: owner };
     }),
@@ -299,7 +328,10 @@ const evaluateCandidate = async (
     return { ...base, outcome: "outside-target", resolved_path: null };
   if (template.expansion.scope === "undetermined")
     return { ...base, outcome: "undetermined", resolved_path: null };
-  const lookup = await resolveTreePath(context.view, template.expansion.path);
+  const lookup = await resolveTreePath(
+    context.view,
+    template.expansion.lookupPath ?? template.expansion.path,
+  );
   if (lookup.kind === "escapes")
     return { ...base, outcome: "escapes-target", resolved_path: null };
   if (lookup.kind !== "file")
@@ -516,7 +548,10 @@ const traceProcess = async (
     context.byInstallName.set(rootSlice.install_name, context.root);
   const pending = [context.root];
   while (pending.length > 0) {
-    signal?.throwIfAborted();
+    if (signal?.aborted)
+      throw new AnalysisCancelledError("trace_dylib_resolution", {
+        cause: signal.reason,
+      });
     const loader = pending.pop() ?? "";
     const current = context.loaded.get(loader);
     if (current === undefined) continue;
@@ -524,8 +559,8 @@ const traceProcess = async (
     for (const dependency of current.slice.dependencies) {
       const edge = await resolveDependency(dependency, loader, context);
       edges.push(edge);
-      // dyld loads LC_LAZY_LOAD_DYLIB images on first use, not at launch.
-      if (dependency.command === "LC_LAZY_LOAD_DYLIB") continue;
+      // dyld loads lazy images on first use, not at launch.
+      if (isLazyLoadCommand(dependency.command)) continue;
       const image = edge.resolution.image;
       if (image === null || context.loaded.has(image)) continue;
       const facts = context.images.get(image);

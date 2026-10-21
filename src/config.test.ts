@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   defaultHopperLauncherPath,
+  nativeAnalysisConfigurationError,
   parseConfig,
 } from "./config/parseConfig.js";
+import {
+  parseEnvironmentValues,
+  parseJebMcpTimeoutMs,
+} from "./config/environment.js";
 import { projectAnalysisError } from "./domain/analysisErrorProjection.js";
 
 it("reports a configuration failure for a NUL in Hopper loader arguments", () => {
@@ -16,6 +21,38 @@ it("reports a configuration failure for a NUL in Hopper loader arguments", () =>
     settings: [{ setting: "HOPPER_LOADER_ARGS_JSON" }],
   });
   expect(result.error.message).toContain("NUL");
+});
+
+it.each([
+  ["unknown value", { CALLER_SETTING: "private\0value" }],
+  ["unknown name", { ["CALLER\0SETTING"]: "private value" }],
+  ["known path", { HOPPER_TARGET_PATH: "private\0path" }],
+] as const)(
+  "rejects a NUL in an environment %s without exposing its value",
+  (_name, environment) => {
+    for (const result of [
+      parseEnvironmentValues(environment),
+      parseConfig(environment),
+    ]) {
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("Expected invalid environment");
+      expect(result.error.settings).toHaveLength(1);
+      expect(result.error.settings[0]?.constraint).toContain("NUL");
+      expect(JSON.stringify(projectAnalysisError(result.error))).not.toContain(
+        "private",
+      );
+    }
+  },
+);
+
+it("accepts ordinary custom environment strings and omitted values", () => {
+  expect(
+    parseEnvironmentValues({
+      CALLER_SETTING: "\nvalue=one;二\t",
+      EMPTY_SETTING: "",
+      OMITTED_SETTING: undefined,
+    }).ok,
+  ).toBe(true);
 });
 
 describe("runtime configuration", () => {
@@ -60,6 +97,28 @@ describe("runtime configuration", () => {
     });
     for (const invalid of ["", "Auto", "ghidra_1", "ghidra "])
       expect(parseConfig({ REA_ANALYSIS_PROVIDER: invalid }).ok).toBe(false);
+  });
+
+  it("shares native admission with doctor and ignores the JEB-only timeout", () => {
+    expect(nativeAnalysisConfigurationError({})).toBeUndefined();
+    expect(
+      nativeAnalysisConfigurationError({ REA_JEB_MCP_TIMEOUT_MS: "abc" }),
+    ).toBeUndefined();
+    expect(parseConfig({ REA_JEB_MCP_TIMEOUT_MS: "abc" }).ok).toBe(true);
+    const rejected = nativeAnalysisConfigurationError({
+      REA_ANALYSIS_PROVIDER: "Hopper",
+      REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc",
+    });
+    expect(rejected?.settings.map(({ setting }) => setting)).toEqual([
+      "REA_ANALYSIS_PROVIDER",
+      "REA_GHIDRA_STARTUP_TIMEOUT_MS",
+    ]);
+    expect(
+      parseConfig({
+        REA_ANALYSIS_PROVIDER: "Hopper",
+        REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc",
+      }).ok,
+    ).toBe(false);
   });
 
   it("parses absolute BYO Ghidra and optional Java paths", () => {
@@ -326,6 +385,40 @@ describe("configuration failure diagnostics", () => {
         },
       });
   });
+});
+
+describe("JEB MCP timeout configuration", () => {
+  it("stays optional and validates the caller-selected environment value", () => {
+    expect(parseJebMcpTimeoutMs(undefined)).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(parseJebMcpTimeoutMs("900000")).toEqual({
+      ok: true,
+      value: 900_000,
+    });
+    expect(
+      parseEnvironmentValues({ REA_JEB_MCP_TIMEOUT_MS: "900000" }),
+    ).toMatchObject({ ok: true, value: { REA_JEB_MCP_TIMEOUT_MS: 900_000 } });
+  });
+
+  it.each(["", "0", "-1", "1.5", "1e3", "invalid", "2147483648"])(
+    "rejects malformed timeout %j with its setting",
+    (value) => {
+      const result = parseJebMcpTimeoutMs(value);
+      if (result.ok) throw new Error("Expected invalid JEB MCP timeout");
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        details: {
+          settings: [
+            {
+              setting: "REA_JEB_MCP_TIMEOUT_MS",
+              constraint: expect.any(String),
+            },
+          ],
+        },
+      });
+    },
+  );
 });
 
 describe("default Linux Hopper launcher", () => {

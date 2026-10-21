@@ -120,12 +120,7 @@ export const registerFridaCommands = (
         const result = await withProviderCleanup(() =>
           service.listDevices(remoteFrom(options)),
         );
-        return result.ok
-          ? {
-              devices: result.value.devices,
-              cleanup_error: result.value.cleanupError,
-            }
-          : projectAnalysisError(result.error);
+        return result.ok ? result.value : projectAnalysisError(result.error);
       }),
   });
   cli.command(CLI_COMMANDS.listFridaProcesses, {
@@ -158,13 +153,7 @@ export const registerFridaCommands = (
               : { remote },
           ),
         );
-        return result.ok
-          ? {
-              device_id: result.value.deviceId,
-              processes: result.value.processes,
-              cleanup_error: result.value.cleanupError,
-            }
-          : projectAnalysisError(result.error);
+        return result.ok ? result.value : projectAnalysisError(result.error);
       }),
   });
   cli.command(CLI_COMMANDS.instrumentWithFrida, {
@@ -215,6 +204,21 @@ export const registerFridaCommands = (
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.instrumentWithFrida, async () => {
+          if (args.mode === "attach" && options.argument !== undefined)
+            return projectAnalysisError(
+              new AnalysisInputError(
+                CLI_COMMANDS.instrumentWithFrida,
+                undefined,
+                [
+                  {
+                    path: ["argument"],
+                    reason: "invalid_value",
+                    message:
+                      "--argument is only valid in spawn mode; remove it when attaching to a process.",
+                  },
+                ],
+              ),
+            );
           if (
             (options.script === undefined) ===
             (options.scriptFile === undefined)

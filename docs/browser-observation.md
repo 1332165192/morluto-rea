@@ -19,7 +19,23 @@ Inspect native SAZ or HAR 1.2 offline with REA, or connect Everywhere's separate
 - `analyze_web_bundle` / `rea analyze-web-bundle` parses selected script artifacts without execution and derives chunk edges, route and endpoint candidates, vendor fingerprints, static WebMCP declarations, and optionally source-map/original-source evidence.
 - `observe_web_session` / `rea observe-web-session` arms an observation window of the requested duration for an external user action and records ordered reload, SPA navigation, redirect, failure, lifecycle, and target-termination metadata.
 - `discover_webmcp_tools` / `rea discover-webmcp-tools` uses the experimental CDP WebMCP domain to return every in-scope registration and its complete observed `input_schema` declaration and canonical `input_schema_sha256` digest inline. Declarations are untrusted JSON data, including declared types, required fields, enums, examples and reference URLs. REA does not resolve schema references. These fields replace `input_schema_shape`. Registrations with the same name and URL in distinct observed frames retain separate identities. `tool_key` includes the observed frame ID; it is not a stable identity across navigation or browser sessions. Same-frame registration updates replace that owner only, and removal leaves other owners intact. Declared `readOnly`, `untrustedContent`, `consequential`, and `autosubmit` annotation hints are reported per registration: `true`/`false` are declared values, `null` means the declaration did not provide the hint in that capture, and a missing `consequential` key means the hint was not recorded, either in a historical capture or because the observed annotation was invalid. Consult discovery completeness and exclusions to distinguish these cases. Malformed annotation values retain the registration with incomplete coverage and an `invalid_protocol_value` exclusion. Other malformed protocol payloads can fail discovery explicitly. REA never exposes `WebMCP.invokeTool`.
+
 - `compare_web_captures` / `rea compare-web-captures` compares passive captures or exact-step-aligned browser scenarios. Scenario results commit reproducible literal normalization and expose alignment failures plus artifact-level action, screenshot, DOM, accessibility, URL, history, storage, and event differences. Missing or truncated evidence is never treated as equivalence.
+
+For `analyze_web_bundle`, each `webmcp_declarations` entry's
+`schema_property_names` is a source-derived projection of statically known own
+property keys, not schema validation. `schema_property_names_coverage` reports
+how complete that projection is: `complete` means a literal properties object
+was fully enumerated (including an empty literal); `partial` means a literal
+object was available but some computed or spread membership was unresolved,
+and the name array retains keys that were known; `unknown` means the schema or
+properties owner could not be enumerated as an object literal, including
+explicit non-object values; `not_present` means no effective schema or own
+`properties` member was present after the `inputSchema ?? input_schema` alias
+selection. `not_present` describes this projection only: it does not validate a
+schema or rule out properties expressed through other schema constructs. Older
+observations may omit the coverage field; treat omission as `unknown` rather
+than inferring completeness from the array.
 
 Passive DOM comparison checks complete node inventories and complete frame
 parent/child structure independently. Frame IDs and sibling enumeration order
@@ -66,14 +82,25 @@ Electron `file://` pages use a separate provider and target boundary; see [elect
 
 ## Provider authorities
 
-CDP page capture, V8 Inspector observation, and Playwright scenarios stay
-separate providers because their authorities differ: CDP and V8 attach to an
-already-running target and never launch, drive, evaluate, or mutate it, while
-Playwright providers own and drive the runtime (launch browsers, run actions,
-capture step snapshots). Merging them would mix attach-only and owned-process
-lifecycles in one contract. What they share instead is one exclusion
-vocabulary (`BrowserExclusionReason`): every denial reason in every stack maps
-onto it, even where a wire schema keeps a narrower historical bucket.
+CDP page capture and V8 Inspector observation attach to an already-running
+target without launching it, driving actions, or evaluating target code.
+Playwright scenarios drive actions and capture step snapshots in either a
+provider-owned browser or a caller-selected external browser. Separate providers
+preserve these authority and lifecycle differences. They share one exclusion
+vocabulary (`BrowserExclusionReason`): every denial reason maps onto it, even
+where a wire schema keeps a narrower historical bucket.
+
+CDP attachment is not a guarantee that the browser preserves all state.
+Chromium can clear another client's `navigator.platform` emulation when REA's
+page session disconnects, even if that session sent no emulation commands.
+This affects page inspection, bundle capture, session observation, screenshots,
+WebMCP discovery, and Electron page inspection; target listing alone does not
+attach a page session. REA cannot read the other client's complete
+user-agent/client-hint configuration and does not replay guessed settings.
+Use a disposable browser when preserving externally configured emulation is
+required, or have the owning client reapply its complete configuration afterward.
+See [the reproduction and Chromium ownership limitation](https://github.com/morluto/rea/issues/4089).
+
 Existing static application Evidence and passive web/Electron captures can be
 combined later through
 [JavaScript static/runtime reconciliation](javascript-runtime-reconciliation.md).
@@ -190,6 +217,11 @@ rea inspect-web-page http://127.0.0.1:9222 TARGET_ID \
   --json
 ```
 
+Passive observation honors the requested duration using cancellable waits within
+the runtime's timer range. Long windows stay pending across successive waits;
+caller cancellation, target termination or leaving the allowed origins ends
+collection early. `window_elapsed` identifies completion of the requested wait.
+
 Static bundle analysis and a user-driven observation window are separate operations:
 
 ```bash
@@ -272,7 +304,29 @@ Call `list_browser_targets` first because target IDs are browser-instance-specif
 
 REA establishes a main-frame origin boundary before enabling Runtime, Debugger, or Network observation, rechecks it before document capture, and validates it again afterward. If the main frame navigates during final capture, REA discards the mixed result and returns `target_changed`.
 
+The web-session timeline uses CDP monotonic seconds where the event producer
+provides a comparable timestamp; absent or invalid timestamps are `null` rather
+than a synthetic zero. Events buffered while REA samples the window boundary are
+retained only when their timestamp places them after that boundary; older events
+are excluded. A buffered event without a comparable timestamp may remain as
+contextual evidence with `timestamp: null`, accompanied by a limitation stating
+that it does not establish activity in the selected window. Main-frame scope
+enforcement still applies to contextual navigation events. Network redirect
+events retain their paired prior-hop response context when the timestamped
+next-request event falls inside the window. The pre-arm timeline buffer is bounded
+by original CDP message bytes. If clock sampling completes after that budget is
+exhausted, the operation returns `payload_limit` instead of a partial window.
+Cancellation and clock-request failures retain their own outcomes.
+
 ## Data minimization
+
+The Link projection parses repeated CDP header field lines independently and
+retains their declarations in order, including derived untrusted agent hints.
+Commas inside URI targets or quoted parameters remain part of those values.
+COOP and COEP projections retain the exact declared token after validating the
+complete Structured Field Item, including parameters such as `report-to`.
+These are declarations, not an assessment of the document's effective policy;
+absent, malformed or non-token items project as `null`.
 
 REA retains local observation data and removes only URL userinfo credentials, explicitly declared scenario secrets, and values from structured credential/storage fields:
 
@@ -281,9 +335,35 @@ REA retains local observation data and removes only URL userinfo credentials, ex
 - Accessibility structure and roles are retained by default, while names and descriptions require `include_accessibility_text: true`.
 - Network observations retain method, status, MIME type, size, type, initiator stack location, and complete URLs with userinfo credentials removed. Redirects reported by CDP are attached as ordered `redirects` on the one request ID, with the prior request URL, CDP response URL, method/type, response status/MIME/encoded length, request timestamp, and the next `requestWillBeSent` event timestamp. CDP delivers `redirectResponse` with that next request event, so the latter is an event boundary rather than an exact response timestamp. Redirect response headers and bodies are discarded; hops outside the selected origins are discarded with the request chain. Headers are discarded after an allowlisted projection of length/encoding, structured CSP/Link/policy fields, and untrusted agent hints. Cookies and authorization headers are never retained.
 - Request/response bodies are not requested or parsed by default. When selected, only allowed-origin JSON media types are read, converted immediately to complete value-free typed paths, types and observation counts, and discarded. Each path segment is either `{ "kind": "property", "name": "raw property name" }` or `{ "kind": "array-element" }`; array-element types include primitives and nested arrays. Literal `*` properties remain distinct from array elements. `Network.getResponseBody` is never sent unless JSON body shape capture is selected. Comparison uses body shapes only when both captures selected them, and compares request/response shapes only where both observations provide those facts. Unavailable or truncated selected coverage makes equivalence unknown; observed differences still report changed.
-- Console observations with a stack source retain call type, argument types, timestamp, and source location. When console text capture is selected, already-delivered primitive values are retained verbatim; objects, getters, and remote properties are never expanded.
-- WebSocket observations retain direction, opcode, and payload byte length. When shape capture is selected, text frames are classified as text or complete value-free JSON shape; binary bytes, hashes, prefixes, and raw frames are never retained.
-- Storage observations always redact values. Key names, IndexedDB names, and cache names require `include_storage_keys`; stable content fingerprints require the additional `include_storage_fingerprints` selection. Cookie fingerprints cover cookies applicable to the current main-frame URL, including its path, rather than every cookie path on that origin. Other storage remains scoped to the origin. Cache bodies above 64 KiB and partial IndexedDB remote objects make fingerprint coverage incomplete, so identical observations remain `unknown`.
+  For normalized passive inputs with complete request inventories on both sides,
+  request additions and removals remain observable even when selected body shapes,
+  response metadata, or WebSocket coverage are unavailable. HTTP request and
+  WebSocket inventory coverage are evaluated separately; complete HTTP coverage
+  cannot prove a missing WebSocket connection. Limited request inventory still
+  prevents request-absence claims. This comparison rule does not make live CDP's
+  attach-limited inventory complete or establish body-shape equality.
+  An unavailable HTTP resource type also leaves request identity incomplete:
+  observations with the same method and URL remain possible matches across types,
+  and identical unknown types cannot establish complete equality. Ambiguous type
+  groups cannot prove membership or content changes either: a missing type may
+  redistribute repeated requests between buckets without changing the requests.
+  Their comparison remains unknown, while independently identified groups retain
+  proven changes. Different methods/URLs and complete empty peer inventories still
+  support absence claims.
+  Relevant dropped-event counts also limit inventory completeness even when no
+  section is listed as truncated: HTTP uses `network_requests`, while WebSocket
+  uses `websocket_connections` and `websocket_frames`. Drops in other event kinds
+  and the aggregate total do not by themselves limit HTTP inventory. Proven
+  modifications remain reportable despite incomplete inventory.
+  Repeated identical HTTP content samples establish multiplicity changes only
+  with complete request inventories; limited inventories retain known content
+  comparisons without interpreting duplicate sample counts as changes.
+  WebSocket stream inventories and connection counts likewise require complete
+  WebSocket coverage. Redirect resource types use only shared known metadata:
+  an omitted type leaves equality unknown rather than proving a modification.
+- Console observations with a stack source retain call type, argument types, the CDP `Runtime.Timestamp` in milliseconds since Unix epoch, and source location. An absent or invalid timestamp is `null` and makes `console_events` incomplete; an observed zero remains zero. This epoch-millisecond clock is separate from the monotonic-second timestamps in `observe-web-session`. When console text capture is selected, already-delivered primitive values are retained verbatim; objects, getters, and remote properties are never expanded.
+- WebSocket observations retain direction, opcode, and payload byte length. A missing or malformed CDP opcode is returned as `null`, with opcode-dependent payload byte length and shape also `null`, and marks `websocket_frames` incomplete. Missing or wrong-typed payload data is not treated as empty; its byte length is `null`, and a text payload shape is unknown. Numeric opcode `0` and an observed empty payload remain distinct from missing data. Opcode is nullable in the public inspection schema, so clients must handle unknown protocol values. When shape capture is selected, text messages are classified as text or complete value-free JSON shape; binary bytes, hashes, prefixes, and raw payloads are never retained.
+- Storage observations always redact values. Key names, IndexedDB names, and cache names require `include_storage_keys`; stable content fingerprints require the additional `include_storage_fingerprints` selection. Cookie fingerprints cover cookies applicable to the current main-frame URL, including its path, rather than every cookie path on that origin. Other storage remains scoped to the origin. Cache fingerprints hash all decoded response bytes, including bodies above 64 KiB, subject to the [64 MiB per-message CDP limit](#request-boundary). Missing or undecodable cache bodies and partial IndexedDB remote objects make fingerprint coverage incomplete, so identical observations remain `unknown`.
 - Unavailable or malformed storage inventories mark `storage_keys` unavailable, even without fingerprints. Comparisons suppress inferred key additions and removals while preserving modifications proven by complete fingerprints on both sides. Previously exported captures are not retroactively corrected; recapture them to obtain these coverage markers.
 - Script metadata is included only when CDP supplies a URL on an allowed origin. Stable keys exclude transient CDP script IDs, and exact transient raw URLs are used only during script/resource reconciliation. URL-less scripts are excluded because their origin cannot be established. When CDP supplies an execution-context association, the accepted script retains its authorized frame ID for later attribution. Script metadata admission bounds retained identity and source-map strings to 8 MiB and 50,000 records. When a source-map URL cannot fit, the script identity remains and source-map coverage reports `resource_budget_exhausted`; rejected script observations are counted without retaining their IDs. Source content is omitted unless explicitly requested and is returned inline as a self-verifying artifact with its SHA-256 digest.
 
@@ -305,6 +385,40 @@ validation and resource bounds. Omitted script metadata makes its affected
 section explicitly truncated.
 Disallowed-origin entries are filtered before retention.
 
+Selected script-source collection shares a 32 MiB aggregate UTF-8 retention
+budget and a 20-second deadline across the capture. An oversized source is
+omitted while later smaller sources may still fit. When the deadline expires,
+remaining source reads are skipped. Script metadata, per-item omission reasons,
+and `script_sources` completeness remain available. A single CDP response can
+still be materialized up to the separate 64 MiB transport limit before source
+admission; the retention budget does not bound that transient allocation.
+
+Bundle parsing and semantic inspection run sequentially in an owned child,
+without executing captured code. `max_heap_mb` defaults to 1024 MiB V8
+old-space; `analysis_timeout_ms` defaults to 30000 per script, including startup
+and transfer. A failed or timed-out script becomes an explicit unknown while
+completed findings and later scripts remain available. `total_analysis_timeout_ms`
+defaults to 300000 across script analysis; expiry returns a typed timeout with
+partial Evidence and identifies unstarted scripts. These controls are also
+available as CLI flags with hyphenated names. Capture and optional source-map
+fetching have separate budgets.
+
+One web-bundle capture/analysis is admitted per REA process at a time. Completed
+script results share an 8 MiB serialized transfer budget, with host heap
+reservation checked before decoding and validating another result.
+Exhausted result capacity stops further script launches and returns a typed
+resource failure with completed facts and explicit unstarted-script unknowns.
+Worker control frames are limited to 64 KiB. Cleanup must confirm child termination
+before releasing its private files; failed cleanup retains its exact owner and
+blocks replacement until retry succeeds. Cancellation retains completed bundle
+facts, including cancellation during final cleanup.
+
+The worker heap setting is not a process-family RSS limit. Node enforces V8
+old-space flags; Bun ignores them. Windows Bun instead uses an owned process
+commit limit with a 512 MiB runtime reserve; other Bun hosts have no enforced
+memory limit. These bounds do not establish an aggregate host-memory limit
+across other REA operations or external processes.
+
 Resource-tree inventories distinguish a valid empty `resources` array from a
 missing or malformed collection. Invalid resource entries are omitted with
 incomplete coverage, while valid resources from that frame and other frames
@@ -317,8 +431,10 @@ an invalid supplied size remains unknown with incomplete resource coverage while
 the resource's other facts are retained. Zero and nonnegative fractional sizes
 are preserved.
 
-CDP discovery, connection, and commands wait for the peer or caller cancellation;
-a stalled peer can leave an operation waiting. WebSocket messages remain subject
+CDP discovery has a 10-second deadline. Each WebSocket handshake and command
+response has its own 20-second deadline, separate from the caller-selected
+observation window. A stalled handshake or command reports `provider_timeout`;
+caller cancellation still reports cancellation. WebSocket messages remain subject
 to the [64 MiB limit](#request-boundary). REA does not impose a message-count or
 pending-command quota. On cancellation, it closes only its own WebSocket,
 waiting up to one second before terminating it. Malformed unsolicited events

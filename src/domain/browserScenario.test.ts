@@ -87,6 +87,34 @@ it("does not require duplicate origin scope declarations", () => {
   );
 });
 
+it("accepts caller-selected safe capture limits and rejects invalid bounds", () => {
+  const base = {
+    browser: { mode: "launch", executable_path: "/opt/chromium" },
+    start_url: { url: "https://example.test/" },
+    actions: [{ step_id: "wait", action: "wait_for_timeout", duration_ms: 1 }],
+  };
+  expect(
+    browserScenarioSchema.parse({
+      ...base,
+      capture: {
+        limits: { max_total_event_allocation_bytes: 32 * 1024 * 1024 },
+      },
+    }).capture.limits,
+  ).toMatchObject({
+    max_events: 10_000,
+    max_event_allocation_bytes: 4 * 1024 * 1024,
+    max_total_event_allocation_bytes: 32 * 1024 * 1024,
+    max_network_body_bytes: 64 * 1024,
+  });
+  for (const invalid of [0, Number.MAX_SAFE_INTEGER + 1, Number.NaN])
+    expect(
+      browserScenarioSchema.safeParse({
+        ...base,
+        capture: { limits: { max_events: invalid } },
+      }).success,
+    ).toBe(false);
+});
+
 it("accepts complete browser inputs beyond former string length caps", () => {
   const longValue = "value".repeat(20_000);
   const longToken = "a".repeat(70_000);
@@ -167,4 +195,61 @@ it("accepts caller-selected viewport sizes and click counts without ceilings", (
     device_scale_factor: 8,
   });
   expect(parsed.actions[0]).toMatchObject({ click_count: 4 });
+});
+
+it.each([
+  {
+    field: "duration_ms",
+    action: { action: "wait_for_timeout", duration_ms: 2_147_483_648 },
+  },
+  {
+    field: "timeout_ms",
+    action: {
+      action: "wait_for",
+      locator: { kind: "css", selector: "#btn" },
+      state: "visible",
+      timeout_ms: 2_147_483_648,
+    },
+  },
+])("rejects $field at its precise owning field", ({ field, action }) => {
+  const parsed = browserScenarioSchema.safeParse({
+    browser: { mode: "launch", executable_path: "/opt/chromium" },
+    start_url: { url: "https://app.example.test/" },
+    actions: [{ step_id: "overflow", ...action }],
+  });
+  if (parsed.success)
+    throw new Error("Expected unrepresentable timer rejection");
+  expect(parsed.error.issues).toMatchObject([
+    { code: "too_big", maximum: 2_147_483_647, path: ["actions", 0, field] },
+  ]);
+});
+
+it("preserves the largest representable timers and an omitted action deadline", () => {
+  const parsed = browserScenarioSchema.parse({
+    browser: { mode: "launch", executable_path: "/opt/chromium" },
+    start_url: { url: "https://app.example.test/" },
+    actions: [
+      {
+        step_id: "max-wait",
+        action: "wait_for_timeout",
+        duration_ms: 2_147_483_647,
+      },
+      {
+        step_id: "max-deadline",
+        action: "wait_for",
+        locator: { kind: "css", selector: "#btn" },
+        state: "visible",
+        timeout_ms: 2_147_483_647,
+      },
+      {
+        step_id: "unbounded",
+        action: "wait_for",
+        locator: { kind: "css", selector: "#btn" },
+        state: "visible",
+      },
+    ],
+  });
+  expect(parsed.actions[0]).toMatchObject({ duration_ms: 2_147_483_647 });
+  expect(parsed.actions[1]).toMatchObject({ timeout_ms: 2_147_483_647 });
+  expect(parsed.actions[2]).not.toHaveProperty("timeout_ms");
 });

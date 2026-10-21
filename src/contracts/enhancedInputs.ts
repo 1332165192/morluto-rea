@@ -5,11 +5,38 @@ const traceLiteralInputSchema = z.strictObject({
   case_sensitive: z.boolean().default(false),
 });
 
+export const DEFAULT_CALL_RELATIONSHIP_DIRECTION = "forward";
+export const MAX_ENHANCED_RECORDS = 20_000;
+const callRelationshipDirectionSchema = z
+  .enum(["forward", "backward"])
+  .default(DEFAULT_CALL_RELATIONSHIP_DIRECTION);
+export type CallRelationshipDirection = z.output<
+  typeof callRelationshipDirectionSchema
+>;
+
 /** Input schemas shared by MCP registration and enhanced application dispatch. */
 export const enhancedInputSchemas = {
   trace_native_values: nativeValueTraceInputSchema,
   inspect_native_dispatch_metadata: z.strictObject({
-    max_records: z.number().int().min(1).max(20_000).default(5_000),
+    max_records: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_ENHANCED_RECORDS)
+      .default(5_000),
+    objc_class_import_addresses: z
+      .array(z.string())
+      .max(MAX_ENHANCED_RECORDS)
+      .describe(
+        "Optional exact pointer-slot addresses from the selected name inventory; used to report decoded Objective-C class import bindings.",
+      )
+      .optional(),
+    objc_class_import_addresses_complete: z
+      .boolean()
+      .describe(
+        "Whether the candidate addresses include every selected class-label row; false keeps binding coverage partial when the existing record budget truncates the scan.",
+      )
+      .optional(),
   }),
   get_objc_classes: z.strictObject({ pattern: z.string().default("") }),
   get_objc_protocols: z.strictObject({}),
@@ -24,7 +51,7 @@ export const enhancedInputSchemas = {
       .describe(
         "A procedure symbol or address to resolve to its canonical entry",
       ),
-    direction: z.enum(["forward", "backward"]).default("forward"),
+    direction: callRelationshipDirectionSchema,
   }),
   analyze_swift_types: z.strictObject({
     category: z
@@ -55,7 +82,7 @@ export const enhancedInputSchemas = {
       .string()
       .describe("An optional destination procedure symbol or address")
       .optional(),
-    direction: z.enum(["forward", "backward"]).default("forward"),
+    direction: callRelationshipDirectionSchema,
   }),
   trace_native_ui_action: z.strictObject({
     action: z

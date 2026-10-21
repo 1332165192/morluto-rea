@@ -1,7 +1,9 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -12,12 +14,50 @@ import {
   runProductionMcpDoctor,
   runProductionMcpDoctorCli,
 } from "../../../src/mcpDoctor.js";
-import { CATALOG_IDENTITY } from "../../../src/catalogIdentity.js";
+import {
+  CATALOG_IDENTITY,
+  createCatalogIdentity,
+} from "../../../src/catalogIdentity.js";
+import { compactPresentationForMcpInputSchemaProfile } from "../../../src/config/mcpInputSchemaProfile.js";
 import { MCP_STARTUP_POLICY } from "../../../src/mcpStartupPolicy.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("production MCP doctor", () => {
+  it("reuses immutable compiled profile digests and preserves custom-budget identity", async () => {
+    // Exercise the generated module with Node, outside Vitest's source loader.
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+        import assert from "node:assert/strict";
+        import { createCatalogIdentity, createCatalogDigests } from "./dist/catalogIdentity.js";
+        import { RECORDED_CATALOG_DIGEST_PROFILES as profiles } from "./dist/recordedCatalogDigests.js";
+        import { COMPACT_INPUT_SCHEMA_BUDGET_BYTES as budgetBytes } from "./dist/config/mcpInputSchemaProfile.js";
+        assert.ok(Object.isFrozen(profiles));
+        for (const input of ["full", "compact"]) {
+          assert.ok(Object.isFrozen(profiles[input]));
+          for (const output of ["full", "off"]) {
+            const identity = createCatalogIdentity(input === "compact" ? { budgetBytes } : undefined, output);
+            assert.equal(identity.digests, profiles[input][output]);
+            assert.ok(Object.isFrozen(identity.digests));
+          }
+        }
+        const selection = { budgetBytes: 1 };
+        const custom = createCatalogIdentity(selection, "off");
+        selection.budgetBytes = budgetBytes;
+        const expected = createCatalogDigests(undefined, undefined, { budgetBytes: 1 }, "off");
+        assert.deepEqual(custom.digests, expected);
+        assert.notEqual(custom.digests.tools_sha256, profiles.compact.off.tools_sha256);
+        assert.equal(custom.digests, custom.digests);
+      `,
+      ],
+      { timeout: 30_000 },
+    );
+  }, 35_000);
+
   it("preserves the full-output envelope for startup failures", async () => {
     const result = await runProductionMcpDoctorCli(
       ["--json", "--full-output"],
@@ -40,14 +80,52 @@ describe("production MCP doctor", () => {
     });
   });
 
-  it.each(["full", "compact"] as const)(
-    "connects to the production stdio child and verifies the %s catalog",
-    async (profile) => {
+  it.each([
+    {
+      name: "full",
+      environment: {
+        REA_MCP_INPUT_SCHEMA_PROFILE: "full",
+        REA_MCP_OUTPUT_SCHEMA_PROFILE: "full",
+      },
+      identity: CATALOG_IDENTITY,
+    },
+    {
+      name: "compact",
+      environment: {
+        REA_MCP_INPUT_SCHEMA_PROFILE: "compact",
+        REA_MCP_OUTPUT_SCHEMA_PROFILE: "full",
+      },
+      identity: createCatalogIdentity(
+        compactPresentationForMcpInputSchemaProfile("compact"),
+      ),
+    },
+    {
+      name: "output schemas off",
+      environment: {
+        REA_MCP_INPUT_SCHEMA_PROFILE: "full",
+        REA_MCP_OUTPUT_SCHEMA_PROFILE: "off",
+      },
+      identity: createCatalogIdentity(undefined, "off"),
+    },
+    {
+      name: "compact input and output schemas off",
+      environment: {
+        REA_MCP_INPUT_SCHEMA_PROFILE: "compact",
+        REA_MCP_OUTPUT_SCHEMA_PROFILE: "off",
+      },
+      identity: createCatalogIdentity(
+        compactPresentationForMcpInputSchemaProfile("compact"),
+        "off",
+      ),
+    },
+  ])(
+    "connects to the production stdio child and verifies the $name catalog",
+    async ({ environment, identity }) => {
       const result = await runProductionMcpDoctor({
         command: process.execPath,
         args: [resolve("scripts/rea.mjs"), "mcp"],
         cwd: process.cwd(),
-        environment: { ...process.env, REA_MCP_INPUT_SCHEMA_PROFILE: profile },
+        environment: { ...process.env, ...environment },
       });
 
       expect(result).toMatchObject({
@@ -68,6 +146,12 @@ describe("production MCP doctor", () => {
       );
       expect(result.inventory?.tools.expected).toBe(
         CATALOG_IDENTITY.counts.mcp_tools,
+      );
+      expect(result.identity?.expected_catalog_digest).toBe(
+        identity.digests.combined_sha256,
+      );
+      expect(result.identity?.observed_catalog_digest).toBe(
+        identity.digests.combined_sha256,
       );
     },
     30_000,

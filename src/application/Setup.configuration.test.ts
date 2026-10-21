@@ -206,9 +206,10 @@ describe("configured Linux Hopper selection", () => {
     host.hopperLauncherConfigured = true;
     host.linuxDemoRuntimeMissing = true;
     const doctor = await host.doctor();
+    const initial = await host.initialSetupState();
     const discovery = await discoverSetupState({
       host,
-      providerEnvironment: { HOPPER_LAUNCHER_PATH: host.hopper },
+      providerConfigured: initial.providerConfigured,
       forceHopperInstall: false,
       proposeHopper: true,
       hopperLauncherConfigured: true,
@@ -227,9 +228,10 @@ describe("configured Linux Hopper selection", () => {
     };
     host.hopper = "/opt/hopper/bin/Hopper";
     host.unsupportedHopperVersion = true;
+    const initial = await host.initialSetupState();
     const discovery = await discoverSetupState({
       host,
-      providerEnvironment: { HOPPER_LAUNCHER_PATH: host.hopper },
+      providerConfigured: initial.providerConfigured,
       forceHopperInstall: false,
       proposeHopper: true,
       initialDoctor: await host.doctor(),
@@ -358,7 +360,7 @@ describe("setup workflow action selection", () => {
     ],
     [
       "readback",
-      "Agent configuration could not be verified after writing. Repair the configuration file or restore its `.rea.backup`, then rerun setup.",
+      "Agent configuration could not be verified. Repair the configuration file, then rerun setup.",
     ],
   ] as const)("explains %s configuration recovery", async (reason, message) => {
     const host = new FakeSetupHost();
@@ -372,6 +374,25 @@ describe("setup workflow action selection", () => {
     expect(result.status).toBe("needs_human");
     expect(result.remediation).toBe(message);
     expect(result.remediation).not.toContain("internal_client_key");
+  });
+
+  it("names the recovery backup that holds the restored original after a readback failure", async () => {
+    const host = new FakeSetupHost();
+    host.hopper = "/Applications/Hopper";
+    host.clients = [{ name: "cursor", configPath: "/agent.json" }];
+    const backupPath = `/agent.json.rea.backup.${"a".repeat(64)}.recovery`;
+    host.clientResults.set("cursor", {
+      status: "failed",
+      reason: "readback",
+      backupPath,
+    });
+    const result = await runSetup(
+      { ...options(true), clientIds: ["cursor"] },
+      host,
+    );
+    expect(result.remediation).toBe(
+      `Agent configuration could not be verified after writing. The original was restored and its backup at ${backupPath} was retained. Repair the configuration file or restore that backup, then rerun setup.`,
+    );
   });
 });
 

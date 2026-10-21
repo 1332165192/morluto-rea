@@ -5,6 +5,11 @@ import {
   webSourceMapDecoderFixture as decoder,
 } from "../../tests/fixtures/webSourceLocation.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import { parseEvidence } from "../domain/evidence.js";
+import {
+  AnalysisCancelledError,
+  AnalysisOutputError,
+} from "../domain/analysisErrorCore.js";
 import { ok } from "../domain/result.js";
 import { webSourceLocationResultSchema } from "../domain/webSourceLocation.js";
 import { WebSourceLocationService } from "./WebSourceLocationService.js";
@@ -141,7 +146,8 @@ it.each([
 );
 it("honors cancellation both before acquisition and across decoder completion", async () => {
   const first = new AbortController();
-  first.abort();
+  const firstReason = { caller: "before source-map acquisition" };
+  first.abort(firstReason);
   const response = await new WebSourceLocationService(
     {
       load: () => {
@@ -151,13 +157,53 @@ it("honors cancellation both before acquisition and across decoder completion", 
     decoder,
   ).trace(args, { signal: first.signal });
   expect(response.ok).toBe(false);
+  if (!response.ok) expect(response.error.cause).toBe(firstReason);
   const controller = new AbortController();
+  const lateReason = { caller: "after source-map provider completion" };
   const late = await service(undefined, {
     trace: (input) => {
-      controller.abort();
+      controller.abort(lateReason);
       return decoder.trace(input);
     },
   }).trace(args, { signal: controller.signal });
   if (late.ok) throw new Error("expected cancellation");
-  expect(late.error._tag).toBe("AnalysisCancelledError");
+  expect(late.error).toBeInstanceOf(AnalysisCancelledError);
+  expect(late.error.cause).toBe(lateReason);
+  expect(parseEvidence(late.error.partialObservation)).toMatchObject({
+    operation: "trace_web_source_location",
+    confidence: "derived",
+  });
+
+  const malformedDecoder: WebSourceMapPort = {
+    trace: async (input, options) => {
+      const decoded = await decoder.trace(input, options);
+      return decoded.ok
+        ? ok({ ...decoded.value, source_map_sha256: "b".repeat(64) })
+        : decoded;
+    },
+  };
+  const malformed = await new WebSourceLocationService(
+    { load: () => Promise.resolve(ok(webSourceLocationFixture())) },
+    malformedDecoder,
+  ).trace(args);
+  expect(malformed.ok).toBe(false);
+  if (!malformed.ok)
+    expect(malformed.error).toBeInstanceOf(AnalysisOutputError);
+
+  const invalidController = new AbortController();
+  const malformedLate = await new WebSourceLocationService(
+    { load: () => Promise.resolve(ok(webSourceLocationFixture())) },
+    {
+      trace: async (input, options) => {
+        const decoded = await decoder.trace(input, options);
+        invalidController.abort();
+        return decoded.ok
+          ? ok({ ...decoded.value, source_map_sha256: "b".repeat(64) })
+          : decoded;
+      },
+    },
+  ).trace(args, { signal: invalidController.signal });
+  expect(malformedLate.ok).toBe(false);
+  if (!malformedLate.ok)
+    expect(malformedLate.error).toBeInstanceOf(AnalysisOutputError);
 });

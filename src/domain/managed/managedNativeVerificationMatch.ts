@@ -100,16 +100,25 @@ export const collectNativeSymbols = (
   return { symbols, accepted, unsupported };
 };
 
-const sameSymbolName = (expected: string, native: NativeSymbol): boolean =>
-  expected ===
-  (native.source === "macho-export" && native.name.startsWith("_")
+const normalizedSymbolName = (native: NativeSymbol): string =>
+  native.source === "macho-export" && native.name.startsWith("_")
     ? native.name.slice(1)
-    : native.name);
+    : native.name;
+
+const sameSymbolName = (expected: string, native: NativeSymbol): boolean =>
+  expected === normalizedSymbolName(native);
 
 const normalizeModule = (value: string): string =>
   basename(value)
     .toLowerCase()
     .replace(/\.(dll|dylib|so|node|exe)$/u, "");
+
+/** A declared module identity, or null when normalization leaves no name. */
+const declaredModuleIdentity = (scope: string | null): string | null => {
+  if (scope === null || scope.trim().length === 0) return null;
+  const identity = normalizeModule(scope);
+  return identity.length > 0 ? identity : null;
+};
 
 const nativeModuleIdentities = (value: string): ReadonlySet<string> => {
   const filename = basename(value).toLowerCase();
@@ -117,6 +126,7 @@ const nativeModuleIdentities = (value: string): ReadonlySet<string> => {
   const identities = new Set([stem]);
   if (/\.(dylib|so)$/u.test(filename) && stem.startsWith("lib"))
     identities.add(stem.slice("lib".length));
+  identities.delete("");
   return identities;
 };
 
@@ -124,8 +134,8 @@ const moduleCompatible = (
   scope: string | null,
   symbol: NativeSymbol,
 ): boolean => {
-  if (scope === null || scope.trim().length === 0) return false;
-  const expected = normalizeModule(scope);
+  const expected = declaredModuleIdentity(scope);
+  if (expected === null) return false;
   return [symbol.module_name, symbol.module_path]
     .filter(
       (value): value is string =>
@@ -198,12 +208,10 @@ const matchPinvoke = (
     };
 
   const candidates: [NativeSymbol, ...NativeSymbol[]] = [first, ...remaining];
-  const scopeKnown =
-    managed.import_scope_name !== null &&
-    managed.import_scope_name.trim().length > 0;
+  const scopeKnown = declaredModuleIdentity(managed.import_scope_name) !== null;
   const exact = candidates.find(
     (symbol) =>
-      managed.import_name === symbol.name &&
+      managed.import_name === normalizedSymbolName(symbol) &&
       moduleCompatible(managed.import_scope_name, symbol),
   );
   const decorated = candidates.find((symbol) =>

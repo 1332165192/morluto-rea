@@ -1,4 +1,5 @@
 import type { JsonValue } from "../../src/domain/jsonValue.js";
+import type { CdpEvent } from "../../src/browser/CdpConnection.js";
 export interface FakeCdpCommand {
   readonly id: number;
   readonly method: string;
@@ -17,11 +18,7 @@ export interface FakeCdpBrowser {
   openedConnectionCount(): number;
   /** Deliver actual malformed wire data without bypassing the production transport parser. */
   emitRawMessage(message: string): void;
-  emitEvent(event: {
-    readonly method: string;
-    readonly params: unknown;
-    readonly sessionId?: string;
-  }): void;
+  emitEvent(event: CdpEvent): void;
   readonly httpRequests: readonly {
     readonly url: string;
     readonly authorization: string | undefined;
@@ -48,13 +45,7 @@ export interface FakeOptions {
   readonly commandEvents?: (
     command: FakeCdpCommand,
     origin: string,
-  ) =>
-    | readonly {
-        readonly method: string;
-        readonly params: unknown;
-        readonly sessionId?: string;
-      }[]
-    | undefined;
+  ) => readonly CdpEvent[] | undefined;
   readonly malformedDiscovery?: boolean;
   readonly oversizedDiscovery?: boolean;
   readonly invalidBrowserWebSocket?: boolean;
@@ -95,6 +86,8 @@ export interface FakeOptions {
   readonly webSocketWithoutFrames?: boolean;
   readonly invalidBinaryWebSocketEvent?: boolean;
   readonly sourceMapBody?: string;
+  /** Accept a source-map request and leave the response open. */
+  readonly hangSourceMap?: boolean;
   readonly sourceMapRedirect?: string;
   readonly sessionTimeline?:
     | "same_origin"

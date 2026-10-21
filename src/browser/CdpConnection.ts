@@ -15,7 +15,12 @@ const MAX_WEBSOCKET_PAYLOAD_BYTES = 0x7fff_ffff;
 export interface CdpEvent {
   readonly method: string;
   readonly params: unknown;
-  readonly sessionId?: string;
+  readonly sessionId?: string | undefined;
+}
+
+export interface CdpTransportEvent extends CdpEvent {
+  /** Original WebSocket message payload size, before JSON parsing. */
+  readonly wireBytes: number;
 }
 
 interface PendingCommand {
@@ -23,13 +28,13 @@ interface PendingCommand {
   readonly sessionId?: string;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: AnalysisError) => void;
-  readonly removeAbort: () => void;
+  readonly dispose: () => void;
 }
 
 /** Correlated JSON-RPC transport for one CDP target operation. */
 export class CdpConnection {
   readonly #pending = new Map<number, PendingCommand>();
-  readonly #listeners = new Set<(event: CdpEvent) => void>();
+  readonly #listeners = new Set<(event: CdpTransportEvent) => void>();
   readonly #disconnectListeners = new Set<
     (error: BrowserObservationError) => void
   >();
@@ -64,8 +69,10 @@ export class CdpConnection {
     operation: BrowserObservationOperation,
     signal?: AbortSignal,
     limits?: { readonly maxPayloadBytes: number },
+    onConnected?: (connection: CdpConnection) => void,
   ): Promise<CdpConnection> {
-    if (signal?.aborted === true) throw new AnalysisCancelledError(operation);
+    if (signal?.aborted === true)
+      throw new AnalysisCancelledError(operation, { cause: signal.reason });
     const maxPayloadBytes =
       limits === undefined
         ? WEB_RUNTIME_LIMITS.protocolBytes
@@ -79,16 +86,40 @@ export class CdpConnection {
         `CDP maxPayloadBytes must be a positive safe integer no greater than ${String(MAX_WEBSOCKET_PAYLOAD_BYTES)}.`,
       );
     const socket = new WebSocket(url, {
+      // waitForOpen owns the deadline and typed handshake failures; the
+      // connection owner registers this socket before waiting for open.
       handshakeTimeout: 0,
       maxPayload: maxPayloadBytes,
       perMessageDeflate: false,
     });
-    await waitForOpen(socket, operation, signal);
-    return new CdpConnection(socket, operation, maxPayloadBytes);
+    const connection = new CdpConnection(socket, operation, maxPayloadBytes);
+    try {
+      onConnected?.(connection);
+    } catch (cause: unknown) {
+      await connection.close();
+      throw cause;
+    }
+    try {
+      await waitForOpen(socket, operation, signal);
+    } catch (cause: unknown) {
+      if (onConnected === undefined) {
+        try {
+          await connection.close();
+        } catch (cleanupCause: unknown) {
+          throw new AggregateError(
+            [cause, cleanupCause],
+            "CDP WebSocket handshake failed and its transport cleanup is incomplete.",
+            { cause },
+          );
+        }
+      }
+      throw cause;
+    }
+    return connection;
   }
 
   /** Subscribe to validated CDP event envelopes. */
-  onEvent(listener: (event: CdpEvent) => void): () => void {
+  onEvent(listener: (event: CdpTransportEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -115,7 +146,7 @@ export class CdpConnection {
     return () => this.#protocolFailureListeners.delete(listener);
   }
 
-  /** Execute one command, optionally within a flat target session. */
+  /** Bound each response separately from the caller-selected observation window. */
   async send(
     method: string,
     params: Readonly<Record<string, unknown>> = {},
@@ -127,44 +158,60 @@ export class CdpConnection {
     if (this.#closed || this.socket.readyState !== WebSocket.OPEN)
       throw this.#transportError(this.#transportFailure);
     if (signal?.aborted === true)
-      throw new AnalysisCancelledError(this.operation);
+      throw new AnalysisCancelledError(this.operation, {
+        cause: signal.reason,
+      });
     const id = this.#nextId;
     this.#nextId += 1;
+    const message = JSON.stringify({
+      id,
+      method,
+      params,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    });
     return await new Promise((resolve, reject) => {
       const onAbort = (): void => {
         const pending = this.#pending.get(id);
         if (pending === undefined) return;
-        pending.removeAbort();
-        this.#pending.delete(id);
-        reject(new AnalysisCancelledError(this.operation));
+        this.#complete(id, pending);
+        reject(
+          new AnalysisCancelledError(this.operation, {
+            cause: signal?.reason,
+          }),
+        );
       };
+      const timer = setTimeout(() => {
+        const pending = this.#pending.get(id);
+        if (pending === undefined) return;
+        this.#complete(id, pending);
+        reject(
+          new BrowserObservationError(this.operation, "timeout", {
+            detail: `CDP command ${method} exceeded its ${String(WEB_RUNTIME_LIMITS.commandTimeoutMs)} ms response deadline.`,
+          }),
+        );
+      }, WEB_RUNTIME_LIMITS.commandTimeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
       this.#pending.set(id, {
         method,
         ...(sessionId === undefined ? {} : { sessionId }),
         resolve,
         reject,
-        removeAbort: () => signal?.removeEventListener("abort", onAbort),
-      });
-      this.socket.send(
-        JSON.stringify({
-          id,
-          method,
-          params,
-          ...(sessionId === undefined ? {} : { sessionId }),
-        }),
-        (error) => {
-          if (error === undefined || error === null) return;
-          const pending = this.#pending.get(id);
-          if (pending === undefined) return;
-          this.#complete(id, pending);
-          reject(
-            new BrowserObservationError(this.operation, "disconnected", {
-              cause: error,
-            }),
-          );
+        dispose: () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
         },
-      );
+      });
+      this.socket.send(message, (error) => {
+        if (error === undefined || error === null) return;
+        const pending = this.#pending.get(id);
+        if (pending === undefined) return;
+        this.#complete(id, pending);
+        reject(
+          new BrowserObservationError(this.operation, "disconnected", {
+            cause: error,
+          }),
+        );
+      });
     });
   }
 
@@ -180,17 +227,64 @@ export class CdpConnection {
   async #closeTransport(): Promise<void> {
     this.#closed = true;
     this.#failPending("disconnected");
-    if (this.socket.readyState === WebSocket.CLOSED) return;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.socket.terminate();
-        resolve();
-      }, 1_000);
-      this.socket.once("close", () => {
+    if (socketIsClosed(this.socket)) return;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let fallbackStarted = false;
+      let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (cause?: unknown): void => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        resolve();
-      });
-      this.socket.close();
+        if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
+        this.socket.off("close", onClose);
+        if (cause === undefined) resolve();
+        else reject(cause);
+      };
+      const onClose = (): void => finish();
+      const forceClose = (gracefulFailure?: unknown): void => {
+        if (settled || fallbackStarted) return;
+        fallbackStarted = true;
+        clearTimeout(timer);
+        if (socketIsClosed(this.socket)) {
+          finish();
+          return;
+        }
+        try {
+          this.socket.terminate();
+        } catch (cause: unknown) {
+          gracefulFailure =
+            gracefulFailure === undefined
+              ? cause
+              : new AggregateError(
+                  [gracefulFailure, cause],
+                  "Graceful and forced CDP WebSocket close both failed.",
+                  { cause: gracefulFailure },
+                );
+        }
+        if (socketIsClosed(this.socket)) finish();
+        else {
+          fallbackTimer = setTimeout(() => {
+            if (socketIsClosed(this.socket)) {
+              finish();
+              return;
+            }
+            finish(
+              gracefulFailure ??
+                new BrowserObservationError(this.operation, "cleanup_failed", {
+                  detail: "REA could not confirm release of its CDP WebSocket.",
+                }),
+            );
+          }, 1_000);
+        }
+      };
+      const timer = setTimeout(() => forceClose(), 1_000);
+      this.socket.once("close", onClose);
+      try {
+        this.socket.close();
+      } catch (closeCause: unknown) {
+        forceClose(closeCause);
+      }
     });
   }
 
@@ -227,9 +321,11 @@ export class CdpConnection {
       this.#failPending("protocol_error");
       return;
     }
-    const event: CdpEvent = {
+    const wireBytes = rawByteLength(data);
+    const event: CdpTransportEvent = {
       method: message.method,
       params: "params" in message ? message.params : {},
+      wireBytes,
       ...(typeof message.sessionId === "string"
         ? { sessionId: message.sessionId }
         : {}),
@@ -242,10 +338,20 @@ export class CdpConnection {
     if (pending === undefined) return;
     const hasResult = "result" in message;
     const hasError = "error" in message;
+    // Chromium cannot route a rejection through a flat session after that
+    // session disappears. Its browser-level reply omits sessionId, but the
+    // connection-global command id still binds this exact terminal error.
+    const detachedSessionError =
+      pending.sessionId !== undefined &&
+      !("sessionId" in message) &&
+      hasError &&
+      isRecord(message.error) &&
+      message.error.code === -32_001 &&
+      message.error.message === "Session with given id not found.";
     if (
       (pending.sessionId === undefined
         ? "sessionId" in message
-        : message.sessionId !== pending.sessionId) ||
+        : message.sessionId !== pending.sessionId && !detachedSessionError) ||
       hasResult === hasError
     ) {
       this.#failPending("protocol_error");
@@ -282,7 +388,7 @@ export class CdpConnection {
   }
 
   #complete(id: number, pending: PendingCommand): void {
-    pending.removeAbort();
+    pending.dispose();
     this.#pending.delete(id);
   }
 
@@ -328,12 +434,20 @@ export class CdpConnection {
   }
 }
 
+const socketIsClosed = (socket: WebSocket): boolean =>
+  socket.readyState === WebSocket.CLOSED;
+
 const rawText = (data: RawData): string =>
   Array.isArray(data)
     ? Buffer.concat(data).toString("utf8")
     : Buffer.isBuffer(data)
       ? data.toString("utf8")
       : Buffer.from(data).toString("utf8");
+
+const rawByteLength = (data: RawData): number =>
+  Array.isArray(data)
+    ? data.reduce((bytes, chunk) => bytes + chunk.byteLength, 0)
+    : data.byteLength;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -351,11 +465,9 @@ const waitForOpen = async (
     const onFailure = (cause: unknown): void => {
       cleanup();
       reject(
-        signal?.aborted === true
-          ? new AnalysisCancelledError(operation)
-          : new BrowserObservationError(operation, "endpoint_unreachable", {
-              cause,
-            }),
+        new BrowserObservationError(operation, "endpoint_unreachable", {
+          cause,
+        }),
       );
     };
     const onClose = (code: number, reason: Buffer): void => {
@@ -366,15 +478,26 @@ const waitForOpen = async (
       );
     };
     const onAbort = (): void => {
+      cleanup();
       terminateSocket(socket);
-      onFailure(new AnalysisCancelledError(operation));
+      reject(new AnalysisCancelledError(operation, { cause: signal?.reason }));
     };
     const cleanup = (): void => {
+      clearTimeout(timer);
       socket.off("open", onOpen);
       socket.off("error", onFailure);
       socket.off("close", onClose);
       signal?.removeEventListener("abort", onAbort);
     };
+    const timer = setTimeout(() => {
+      terminateSocket(socket);
+      cleanup();
+      reject(
+        new BrowserObservationError(operation, "timeout", {
+          detail: `CDP WebSocket handshake exceeded its ${String(WEB_RUNTIME_LIMITS.commandTimeoutMs)} ms deadline.`,
+        }),
+      );
+    }, WEB_RUNTIME_LIMITS.commandTimeoutMs);
     socket.once("open", onOpen);
     socket.once("error", onFailure);
     socket.once("close", onClose);
@@ -383,6 +506,9 @@ const waitForOpen = async (
   });
 
 const terminateSocket = (socket: WebSocket): void => {
-  socket.once("error", () => undefined);
-  socket.terminate();
+  try {
+    socket.terminate();
+  } catch {
+    // The owning connection remains registered and will retry bounded close.
+  }
 };

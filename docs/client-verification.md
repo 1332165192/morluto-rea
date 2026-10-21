@@ -6,6 +6,28 @@ and provider lanes. Each record below states its host, client version, model
 fixture, and remaining coverage; a native-client run with a loopback model does
 not establish live model-service acceptance.
 
+## Published Pi code-mode renderer limit
+
+A separate probe of the published `@earendil-works/pi-codemode` 1.1.0 and 1.2.0
+declaration renderers rendered the full `compare_web_captures` input as
+`args: unknown`: its generated TypeScript type exceeds Pi's 16,000-character
+default. REA keeps the full advertisement's fields by inlining references when
+the shared form would exceed Pi's 32-reference expansion limit; retaining that
+shared form would leave later fields unknown instead. The existing
+`REA_MCP_INPUT_SCHEMA_PROFILE=compact` profile lets callers stay below
+its character limit by advertising reduced nested validation structure, while
+REA continues to validate calls against the complete canonical input schema.
+Compact applies to the server's advertised inputs and is not an automatic
+full-profile fallback; see the [compact input schema profile](mcp-contracts.md#compact-input-schema-profile)
+for details of its reduced forms.
+
+Custom renderer hosts can raise `inputMaxChars` through `renderToolSignature` or
+`renderToolSample`; `renderDeclarations` does not expose that override. The
+probe exercised the published renderer code, not a native Pi host or model, and
+does not establish broader Pi compatibility. See the pinned upstream
+[`declarations.ts`](https://github.com/earendil-works/pi/blob/b45e0ebcc5ae2fc42a6f2f23104d10e656e6bedb/packages/codemode/src/declarations.ts)
+and [renderer usage notes](https://github.com/earendil-works/pi/blob/b45e0ebcc5ae2fc42a6f2f23104d10e656e6bedb/packages/codemode/README.md#declarations-for-the-model).
+
 ## End-to-end, integration and golden evidence
 
 The optional `verify:qwen-client`, `verify:pi-client`, and `verify:hermes-client`
@@ -435,11 +457,22 @@ disposable HOME and CODEX_HOME under `~/.cache/rea-agent-evaluations/`. Set
 `REA_AGENT_EVAL_ROOT` to choose another parent directory outside the OS temporary
 directory: current Codex refuses helper aliases under `/tmp`, preventing shell
 commands and skill reads even if MCP works. Each owned run directory is removed
-after verification unless fixture retention is requested. The lane
+after verification unless fixture retention is requested. Commands share the
+owned-process supervisor: native ownership preparation has its own bounded
+deadline before each short command budget, and timeouts join bounded process-tree
+and output cleanup before returning. If cleanup remains incomplete, the lane retries its retained
+owner and preserves the run directory (including disposable auth) rather than
+removing files still in use; the error retains ownership and recovery details.
+Command stderr is limited to 32 KiB and combined version output to 8 KiB;
+exceeding these diagnostic budgets fails explicitly. Scenario JSON events stream
+to the evaluator without retaining a second raw stdout copy. Cleanup attempts the
+remaining run tree even if auth removal fails, and reports unresolved cleanup
+together with the original verification failure. The lane
 installs the packaged skill and MCP registration through public `rea setup`,
 rather than copying a skill into a project that also inherits the caller's
 skills and configuration. Only authentication is copied, when present, and it
-is removed even with `REA_AGENT_EVAL_KEEP_FIXTURES=true`. No user configuration,
+is removed after confirmed process cleanup even with
+`REA_AGENT_EVAL_KEEP_FIXTURES=true`. No user configuration,
 rules, plugins or history is copied; shell snapshots and additional agents are
 disabled. Existing API-key environment authentication remains available.
 The native missing-provider scenario preapproves only `open_binary` and

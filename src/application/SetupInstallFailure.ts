@@ -1,4 +1,5 @@
 import { HOPPER_PUBLISHER } from "../domain/hopperPublisher.js";
+import { HOPPER_LINUX_PRIMARY_FINGERPRINT } from "./HopperReleaseFeed.js";
 import type { LinuxPackageInstallFailure } from "./LinuxHopper.js";
 
 export type SetupFailureCode =
@@ -23,12 +24,18 @@ export type SetupHopperInstallResult =
       readonly status: "installed";
       readonly launcherPath: string;
       readonly cleanupFailure?: string;
+      readonly warning?: string;
     }
   | {
       readonly status: "failed";
       readonly code: SetupFailureCode;
       readonly remediation: string;
     };
+
+export type SetupHopperInstallFailure = Extract<
+  SetupHopperInstallResult,
+  { readonly status: "failed" }
+>;
 
 export type HopperInstallFailureReason =
   | "unsupported_host"
@@ -44,6 +51,8 @@ export type HopperInstallFailureReason =
   | "mount"
   | "bundle"
   | "publisher_verification_failed"
+  | "verification_unavailable"
+  | "cleanup_failed"
   | "copy";
 
 const normalizePackageOutput = (output: string): string =>
@@ -93,7 +102,8 @@ const packageManagerRemediation = (
 export const setupInstallFailure = (
   reason: HopperInstallFailureReason,
   packageFailure?: LinuxPackageInstallFailure,
-): SetupHopperInstallResult => {
+  platform: NodeJS.Platform = "darwin",
+): SetupHopperInstallFailure => {
   switch (reason) {
     case "unsupported_host":
       return {
@@ -126,21 +136,21 @@ export const setupInstallFailure = (
         status: "failed",
         code: "runtime_dependency_unavailable",
         remediation:
-          "Hopper was installed but required shared libraries are missing. Rerun rea setup, then apply the hopper-demo-runtime remediation from rea doctor.",
+          "Hopper's required runtime could not be verified. Inspect rea doctor --provider hopper; on a supported system use rea setup --install-hopper to repair its dependencies.",
       };
     case "unsupported_hopper_build":
       return {
         status: "failed",
         code: "unsupported_hopper_build",
         remediation:
-          "The installed Hopper launcher does not match the build supported by this REA release. Unset HOPPER_LAUNCHER_PATH, reinstall through rea setup, or update REA.",
+          "The installed Hopper launcher does not match the authenticated vendor package. Check HOPPER_LAUNCHER_PATH and reinstall the official Hopper demo through rea setup.",
       };
     case "cancelled":
       return {
         status: "failed",
         code: "setup_cancelled",
         remediation:
-          "Setup was cancelled before Hopper was installed. Rerun rea setup when ready.",
+          "Setup was cancelled. Run rea doctor to inspect the current state before retrying.",
       };
     case "destination_exists":
       return {
@@ -167,7 +177,24 @@ export const setupInstallFailure = (
       return {
         status: "failed",
         code: "publisher_verification_failed",
-        remediation: `The mounted Hopper application is not signed by the publisher REA pins (${HOPPER_PUBLISHER.bundleIdentifier}, Apple team ${HOPPER_PUBLISHER.teamIdentifier}); nothing was copied or launched. Install Hopper yourself and set HOPPER_LAUNCHER_PATH to its launcher, then rerun rea setup.`,
+        remediation:
+          platform === "linux"
+            ? `The Hopper package signature did not verify under the pinned primary PGP fingerprint ${HOPPER_LINUX_PRIMARY_FINGERPRINT}; the package manager was not run. Download the official package and retry setup.`
+            : `The mounted Hopper application is not signed by the publisher REA pins (${HOPPER_PUBLISHER.bundleIdentifier}, Apple team ${HOPPER_PUBLISHER.teamIdentifier}); nothing was copied or launched. Install Hopper yourself and set HOPPER_LAUNCHER_PATH to its launcher, then rerun rea setup.`,
+      };
+    case "verification_unavailable":
+      return {
+        status: "failed",
+        code: "publisher_verification_failed",
+        remediation:
+          "REA could not authenticate or retain the signed Hopper package. Check vendor access, native package inspection tools and caller-owned cache permissions, then retry setup.",
+      };
+    case "cleanup_failed":
+      return {
+        status: "failed",
+        code: "cleanup_failed",
+        remediation:
+          "Hopper publisher verification retained temporary cleanup ownership. Retry cleanup before running setup again.",
       };
     case "copy":
       return {

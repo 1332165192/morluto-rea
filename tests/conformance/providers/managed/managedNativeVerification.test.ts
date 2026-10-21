@@ -162,6 +162,20 @@ it("verifies a P/Invoke declaration against native export Evidence", () => {
   });
 });
 
+it("treats a Mach-O ABI-prefixed export as an exact declared import", () => {
+  const result = verifyManagedNativeBoundaries({
+    ...exampleInput(),
+    native_observations: [nativeEvidenceWithExports(["_open_native"])],
+  });
+
+  expect(result.summary).toMatchObject({ verified: 1, inferred: 0 });
+  expect(result.pinvoke_imports[0]).toMatchObject({
+    status: "verified",
+    basis: "exact-export-name",
+    matched_native: { name: "_open_native" },
+  });
+});
+
 it("reports module mismatch as a contradiction within supplied Evidence", () => {
   const input = exampleInput();
   const native = input.native_observations[0];
@@ -247,6 +261,22 @@ it("keeps name candidates unresolved when a required module identity is absent",
     expect(result.pinvoke_imports[0]?.limitations).toContain(
       "A native name candidate exists, but a required module identity is unavailable; module correspondence is unknown.",
     );
+  }
+
+  for (const path of [
+    "/examples/lib.dylib",
+    "/examples/lib.so",
+    "/examples/foo.dll",
+  ]) {
+    const extensionOnly = verifyManagedNativeBoundaries({
+      ...inputWithImportScope(".dll"),
+      native_observations: [nativeEvidenceWithExports(["open_native"], path)],
+    });
+    expect(extensionOnly.pinvoke_imports[0]).toMatchObject({
+      status: "unresolved",
+      basis: "module-identity-unknown",
+      candidates: [{ name: "open_native", module_path: path }],
+    });
   }
 
   const subjectless = verifyManagedNativeBoundaries({

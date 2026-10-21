@@ -1,7 +1,22 @@
 import { z } from "zod";
+import { BINARY_ARCHITECTURES } from "../binaryTargetTypes.js";
 import { digestSchema } from "../digests.js";
 import { localPathStringSchema } from "../localPath.js";
-import { CANONICAL_BASE64_PATTERN } from "../stringPatterns.js";
+import { canonicalBase64Schema } from "../stringPatterns.js";
+
+/** Map reader architecture names into Evidence identity; unknown names stay unknown. */
+export const goArchitectureForSubject = (architecture: string) => {
+  switch (architecture) {
+    case "386":
+      return "x86";
+    case "amd64":
+      return "x86_64";
+    default:
+      return BINARY_ARCHITECTURES.find(
+        (supported) => supported === architecture,
+      );
+  }
+};
 
 const sourceRangeSchema = z.strictObject({
   offset: z.number().int().nonnegative(),
@@ -25,9 +40,7 @@ export const goModuleMetadataSchema = z.strictObject({
   dependencies: z.array(goModuleSchema),
   settings: z.array(z.strictObject({ key: z.string(), value: z.string() })),
   unparsed_lines: z.array(z.string()),
-  unparsed_line_bytes_base64: z.array(
-    z.string().regex(CANONICAL_BASE64_PATTERN),
-  ),
+  unparsed_line_bytes_base64: z.array(canonicalBase64Schema),
   complete: z.boolean(),
 });
 
@@ -36,6 +49,12 @@ export const inspectGoBinaryInputSchema = z.strictObject({
   path: localPathStringSchema.describe(
     "Absolute filesystem path to the selected executable or library",
   ),
+  detail: z
+    .enum(["complete", "summary"])
+    .default("complete")
+    .describe(
+      "complete returns all metadata inline; summary retains complete Evidence and returns build identity and counts for subsequent retained Go views.",
+    ),
 });
 
 /** Compiler-written build information and its original file-backed source ranges. */
@@ -43,9 +62,9 @@ export const goBuildInfoSchema = z.strictObject({
   header_offset: z.number().int().nonnegative(),
   encoding: z.enum(["inline", "pointer"]),
   go_version: z.string().nullable(),
-  go_version_bytes_base64: z.string().regex(CANONICAL_BASE64_PATTERN),
+  go_version_bytes_base64: canonicalBase64Schema,
   module_text: z.string().nullable(),
-  module_bytes_base64: z.string().regex(CANONICAL_BASE64_PATTERN),
+  module_bytes_base64: canonicalBase64Schema,
   version_location: sourceRangeSchema,
   module_location: sourceRangeSchema,
   module: goModuleMetadataSchema,

@@ -1,4 +1,4 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 
 import type { ConfigurationError } from "../domain/configurationErrors.js";
 import { ok, type Result } from "../domain/result.js";
@@ -16,7 +16,7 @@ import {
 const executableAvailable = (path: string): boolean => {
   try {
     accessSync(path, constants.X_OK);
-    return true;
+    return statSync(path).isFile();
   } catch {
     return false;
   }
@@ -39,11 +39,35 @@ export const defaultHopperLauncherPath = (
   );
 };
 
+/**
+ * Environment native analysis admits. JEB validates its own timeout during
+ * optional provider composition; that setting must not block unrelated
+ * CLI/MCP startup. Registration validation still checks it directly.
+ */
+const nativeAnalysisEnvironment = (
+  environment: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string | undefined>> => {
+  const { REA_JEB_MCP_TIMEOUT_MS: _jebTimeout, ...appEnvironment } =
+    environment;
+  return appEnvironment;
+};
+
+/**
+ * The configuration error native commands return, without probing launchers.
+ * Doctor uses this so readiness and analysis admit the same settings.
+ */
+export const nativeAnalysisConfigurationError = (
+  environment: Readonly<Record<string, string | undefined>>,
+): ConfigurationError | undefined => {
+  const parsed = parseEnvironment(nativeAnalysisEnvironment(environment));
+  return parsed.ok ? undefined : parsed.error;
+};
+
 /** Parse provider configuration and runtime prerequisites at the composition root. */
 export const parseConfig = (
   environment: Readonly<Record<string, string | undefined>>,
 ): Result<AppConfig, ConfigurationError> => {
-  const parsed = parseEnvironment(environment);
+  const parsed = parseEnvironment(nativeAnalysisEnvironment(environment));
   if (!parsed.ok) return parsed;
   const env = parsed.value;
   return ok({

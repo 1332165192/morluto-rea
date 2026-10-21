@@ -173,12 +173,11 @@ const cleanupInventoryOwners = async ({
   for (const owner of owners) {
     const attempt = await options.resourceScope.release(owner);
     if (attempt.kind === "released") continue;
-    const primary =
-      cleanupFailure ??
-      (outcome.kind === "failed" ? outcome.cause : attempt.cause);
-    cleanupFailure = ArtifactReaderFailure.withCleanup(
-      primary,
-      ArtifactReaderFailure.cleanupObservation(attempt.cause, owner.resource),
+    cleanupFailure = options.resourceScope.cleanupFailure(
+      cleanupFailure === undefined
+        ? outcome
+        : { kind: "failed", cause: cleanupFailure },
+      [attempt],
       outcome.kind === "completed"
         ? { kind: "artifact-inventory", inventory: outcome.snapshot }
         : undefined,
@@ -221,6 +220,7 @@ const buildInventorySnapshot = async (
     executable: hostExecutableMarking(path, metadata),
     format: rootFormat,
     path,
+    formatMetadata: reader?.formatMetadata?.(),
   });
   for (const occurrence of input.occurrences)
     if (
@@ -289,7 +289,6 @@ const buildInventorySnapshot = async (
     provenance: reader?.provenance() ?? [],
     integrity_contradictions: integrityContradictions,
     coverage,
-    coverage_status: coverage.status === "complete" ? "complete" : "partial",
     limitations: buildLimitations(
       [...traversal.limitations, ...edgeResult.limitations],
       integrityContradictions,
@@ -314,14 +313,12 @@ const buildIntegrityContradictions = (
       contradiction_id: artifactContradictionId({
         rootArtifactId: rootNode.artifact_id,
         logicalPath: occurrence.logical_path,
-        declaredSha256: contradiction.declaredSha256,
-        observedSha256: contradiction.observedSha256,
+        integrity: contradiction.integrity,
       }),
       occurrence_id: occurrence.occurrence_id,
       parent_artifact_id: parentArtifactId,
       logical_path: occurrence.logical_path,
-      declared_sha256: contradiction.declaredSha256,
-      observed_sha256: contradiction.observedSha256,
+      ...contradiction.integrity,
       entry_kind: contradiction.entryKind,
       unpacked: contradiction.unpacked,
       trust: "observed-untrusted",

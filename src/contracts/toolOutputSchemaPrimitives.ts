@@ -1,11 +1,9 @@
+import { procedureInfoSchema } from "../domain/native/procedureInfo.js";
 import { z } from "zod";
 
 import {
-  procedureClassificationSchema,
   procedureIdentitySchema,
-  localVariableSchema,
   functionDossierSchema,
-  functionBodySchema,
 } from "../domain/hopperValues.js";
 import { analysisProfileSchema } from "../domain/analysisProfile.js";
 import {
@@ -25,6 +23,7 @@ import {
 import { analysisErrorProjectionSchema } from "./errorSchemas.js";
 import { relationshipCoverageSchema } from "../domain/relationshipCoverage.js";
 import { ZIP_PACKAGE_FORMATS } from "../domain/zipPackageFormat.js";
+import { objcClassImportIdentitySchema } from "../domain/native/objcSwiftMetadata.js";
 
 /** Specialize the single normalized result inside a complete Evidence record. */
 export const evidenceResultOf = <Schema extends z.ZodType>(schema: Schema) =>
@@ -62,6 +61,7 @@ export const targetFormatSchema = z.enum([
   "raw-binary",
   ...ZIP_PACKAGE_FORMATS,
   "asar",
+  "godot-pck",
   "dmg",
   "pkg",
   "plist",
@@ -259,6 +259,12 @@ const providerRejectionCode: z.ZodType<ProviderRejectionCode> = z.enum(
 const providerDiagnostics = z.record(z.string(), jsonValueSchema);
 
 const providerAvailability = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("unknown"),
+    code: z.null(),
+    reason: z.string().min(1),
+    diagnostics: providerDiagnostics,
+  }),
   z.object({
     status: z.literal("available"),
     code: z.null(),
@@ -463,6 +469,7 @@ export const expandToolAvailability = (
 
 export const sessionProvider = z
   .object({
+    cleanup_pending: z.boolean(),
     capabilities: z.array(providerCapabilitySet),
     analysis_run: analysisRun,
     analysis_activity: analysisActivity,
@@ -571,34 +578,6 @@ const availableMemoryPermissions = z.object({
   source: z.literal("ghidra-memory-block"),
 });
 
-export const addressedValue = z.object({
-  address: z.string(),
-  value: z.string(),
-  symbol: z
-    .object({
-      primary: z.boolean(),
-      dynamic: z.boolean(),
-      external: z.boolean(),
-      type: z.string(),
-      source: z.enum(["default", "analysis", "ai", "imported", "user_defined"]),
-    })
-    .optional(),
-  procedure: z
-    .object({
-      external: z.boolean(),
-      thunk: z.boolean(),
-      thunk_target: z.string().nullable(),
-    })
-    .optional(),
-  string: z
-    .object({
-      encoding: z.string(),
-      termination: z.enum(["missing", "present_or_not_required"]),
-      byte_length: z.number().int().min(0),
-    })
-    .optional(),
-});
-
 const memoryRegionOutput = z.object({
   name: z.string(),
   start: z.string(),
@@ -618,18 +597,7 @@ export const segmentOutput = evidenceResultOf(
   z.array(memoryRegionOutput.extend({ sections: z.array(memoryRegionOutput) })),
 );
 
-export const procedureInfoOutput = evidenceResultOf(
-  z.object({
-    name: z.string(),
-    entrypoint: z.string(),
-    basicblock_count: z.number().int().min(0),
-    length: z.number().min(0),
-    signature: nullableText,
-    locals: z.array(localVariableSchema),
-    classification: procedureClassificationSchema.nullable(),
-    body: functionBodySchema,
-  }),
-);
+export const procedureInfoOutput = evidenceResultOf(procedureInfoSchema);
 
 export const symbolDiscoveryOutput = (property: "classes" | "protocols") =>
   evidenceResultOf(
@@ -638,6 +606,32 @@ export const symbolDiscoveryOutput = (property: "classes" | "protocols") =>
       [property]: z.array(addressedEntry),
     }),
   );
+
+export const objcClassDiscoveryOutput = evidenceResultOf(
+  z.object({
+    count: z.number().int().min(0),
+    classes: z.array(
+      addressedEntry.extend({
+        binding_identity: objcClassImportIdentitySchema
+          .extend({
+            slot_addresses: z.array(z.string().min(1)).min(1),
+          })
+          .optional(),
+      }),
+    ),
+    identity_coverage: z.strictObject({
+      status: z.enum([
+        "complete",
+        "partial",
+        "unsupported",
+        "not_requested",
+        "unknown",
+        "not_applicable",
+      ]),
+      reason: z.string().nullable(),
+    }),
+  }),
+);
 
 export const graphNode = z.discriminatedUnion("status", [
   z.object({

@@ -1,5 +1,24 @@
+import {
+  artifactIntegrityClaimSchema,
+  artifactSha256PairSchema,
+  artifactMd5PairSchema,
+} from "./artifactIntegrity.js";
+import { artifactFormatMetadataSchema } from "./artifactFormatMetadata.js";
 import { z } from "zod";
 import { prefixedDigestSchema } from "./../domain/digests.js";
+
+/** Entry kinds or subtrees deliberately excluded by an artifact traversal. */
+export const artifactTraversalOmissionKindSchema = z.enum([
+  "fifo",
+  "socket",
+  "block-device",
+  "character-device",
+  "unsupported",
+  "directory-descendants",
+]);
+export type ArtifactTraversalOmissionKind = z.infer<
+  typeof artifactTraversalOmissionKindSchema
+>;
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const artifactIdSchema = prefixedDigestSchema("art");
@@ -41,6 +60,7 @@ const artifactFormatSchema = z.enum([
   "zip",
   "pkg",
   "asar",
+  "godot-pck",
   "javascript-bundle",
   "source-map",
   "mach-o-universal",
@@ -69,6 +89,7 @@ const artifactFormatSchema = z.enum([
 /** Formats established from bytes or a virtual directory tree, independent of path roles. */
 const artifactContentFormatSchema = artifactFormatSchema.extract([
   "zip",
+  "godot-pck",
   "mach-o-universal",
   "mach-o",
   "elf",
@@ -136,23 +157,29 @@ export const artifactOccurrenceSchema = z.object({
   encrypted: z.boolean(),
   hash_status: z.enum(["verified", "mismatched", "not-hashed", "unavailable"]),
   source_location: artifactByteRangeSchema.nullable(),
+  declared_integrity: artifactIntegrityClaimSchema.exactOptional(),
+  format_metadata: artifactFormatMetadataSchema.exactOptional(),
   limitations: z.array(z.string()),
 });
 
 /** Observed bytes that contradict a container's declared integrity identity. */
-export const integrityContradictionSchema = z.object({
+const integrityContradictionBaseSchema = z.object({
   contradiction_id: contradictionIdSchema,
   occurrence_id: occurrenceIdSchema,
   parent_artifact_id: artifactIdSchema,
   logical_path: boundedRelativePathSchema,
-  declared_sha256: sha256Schema,
-  observed_sha256: sha256Schema,
+
   entry_kind: z.enum(["file", "slice"]),
   unpacked: z.boolean(),
   trust: z.literal("observed-untrusted"),
   provenance: z.literal("container-integrity-metadata-versus-observed-bytes"),
   limitations: z.array(z.string()).min(1),
 });
+
+export const integrityContradictionSchema = z.union([
+  integrityContradictionBaseSchema.extend(artifactSha256PairSchema.shape),
+  integrityContradictionBaseSchema.extend(artifactMd5PairSchema.shape),
+]);
 
 /**
  * Parent-child derivation relation between two content-addressed artifacts.
@@ -196,31 +223,17 @@ export type ArtifactInventoryCoverage = z.infer<
   typeof artifactInventoryCoverageSchema
 >;
 
-/** Complete inventory observation containing the stable artifact graph. */
-export const artifactInventoryResultSchema = z.object({
+/** Current inventory observation containing the stable artifact graph. */
+export const artifactInventoryResultSchema = z.strictObject({
   manifest: artifactGraphManifestSchema,
   nodes: z.array(artifactNodeSchema),
   occurrences: z.array(artifactOccurrenceSchema),
   edges: z.array(artifactEdgeSchema),
   provenance: z.array(artifactCommandSchema),
-  integrity_contradictions: z.array(integrityContradictionSchema).default([]),
-  // Omitted by older retained Evidence; the inventory parser owns its compatibility policy.
-  coverage: artifactInventoryCoverageSchema.optional(),
+  integrity_contradictions: z.array(integrityContradictionSchema),
+  coverage: artifactInventoryCoverageSchema,
   limitations: z.array(z.string()),
-  /** Optional only for persisted inventory Evidence written before this field. */
-  coverage_status: z.enum(["complete", "partial"]).optional(),
 });
-
-/** Current producers always declare coverage; historical Evidence inputs may omit it. */
-export const artifactInventoryOutputSchema =
-  artifactInventoryResultSchema.safeExtend({
-    coverage: artifactInventoryCoverageSchema,
-    coverage_status:
-      artifactInventoryResultSchema.shape.coverage_status.unwrap(),
-  });
-export type ArtifactInventoryOutput = z.infer<
-  typeof artifactInventoryOutputSchema
->;
 
 /** One safely materialized artifact beneath caller-approved output root. */
 const extractedArtifactSchema = z.object({

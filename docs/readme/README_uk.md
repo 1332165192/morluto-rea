@@ -1,7 +1,7 @@
 <div align="center">
 
 [English](../../README.md) · [简体中文](README_zh.md) · [繁體中文](README_zh-TW.md) · [日本語](README_ja.md) · [한국어](README_ko.md) · [Türkçe](README_tr.md) · [Русский](README_ru.md) · [Tiếng Việt](README_vi.md) · [ไทย](README_th.md) · [Deutsch](README_de.md) · [Español](README_es.md) · [Français](README_fr.md) · **Українська** · [Polski](README_pl.md) · [Português (Brasil)](README_pt-BR.md) · [العربية](README_ar.md) · [فارسی](README_fa.md) · [Bahasa Indonesia](README_id.md) · [Italiano](README_it.md)
-· [Ελληνικά](README_el.md)
+· [Ελληνικά](README_el.md) · [മലയാളം](README_ml.md)
 
 # REA: Реверс-інжиніринг будь-чого
 
@@ -146,6 +146,7 @@ REA потребує Node.js 22.x (>=22.19), 24.x (>=24.11) або 26+, а та�
 | Байт-код EVM                         | Селектори диспетчеризації, зміщення байтів, виведені припущення про аргументи та змінюваність стану               | Локальні необроблені байти або шістнадцяткове представлення у Linux x64; [посібник EVM без запуску](../evm-bytecode.md)                           |
 | Rust binaries                        | Embedded cargo-auditable dependency list                                                                          | [Rust binaries](../rust-binaries.md)                                                                                                              |
 | Записані аварійні завершення в Linux | Необроблені записи note, регістри/сигнали кожного записаного потоку й необов'язкові кандидати зіставлення пам'яті | pwntools, наданий стороною, що викликає інструмент, у Linux x64; необов'язкові GDB/pwndbg; [записані аварійні завершення](../recorded-crashes.md) |
+| Встановлені настільні програми       | Можливі середовища виконання, файли доказів, компоненти та наступні кроки                                         | Обмежена перевірка каталогів і заголовків；[Настільні програми](../desktop-applications.md)                                                       |
 | JavaScript / Electron                | Модулі, імпорти, карти вихідного коду, маршрути, IPC і зв'язки з нативними доповненнями                           | Node.js і npm; [аналіз застосунків](../javascript-application-workflows.md)                                                                       |
 | Сайти                                | Структура сторінки, скрипти, мережеві спостереження й запитані знімки екрана                                      | Браузер сімейства Chrome; [аналіз браузера](../browser-observation.md)                                                                            |
 | Збережені мережеві захоплення        | Запити, відповіді, доступні корисні дані та місця в джерелі                                                       | HAR; mitmdump у Linux для захоплень у власному форматі mitmproxy; [посібник мережевих захоплень](../web-network-captures.md)                      |
@@ -166,7 +167,7 @@ REA потребує Node.js 22.x (>=22.19), 24.x (>=24.11) або 26+, а та�
 
 <a id="choosing-a-deep-analysis-provider"></a>
 
-Нативні формати й підтримка систем відрізняються залежно від провайдера. Дивіться [налаштування Hopper і Ghidra](../installation.md#hopper), [посібник IDA](../ida-provider.md) та [експериментальну підтримку Ghidra у Windows](../windows-ghidra-p0.md). Ghidra також підтримує [аналіз 16-бітного DOS](../ghidra-dos.md). Для вибору провайдера дивіться [посібник CLI](../cli.md#choose-a-provider). Для функцій, доданих після найновішої версії в npm, перевірте [доступність у випусках](../installation.md#released-package-and-main).
+Нативні формати й підтримка систем відрізняються залежно від провайдера. Дивіться [налаштування Hopper і Ghidra](../installation.md#hopper), [посібник IDA](../ida-provider.md), [Kuna](../kuna-provider.md) та [експериментальну підтримку Ghidra у Windows](../windows-ghidra-p0.md). Ghidra також підтримує [аналіз 16-бітного DOS](../ghidra-dos.md). Для вибору провайдера дивіться [посібник CLI](../cli.md#choose-a-provider). Для функцій, доданих після найновішої версії в npm, перевірте [доступність у випусках](../installation.md#released-package-and-main).
 
 ## Приклади
 
@@ -263,6 +264,7 @@ npx rea-agents@latest setup
 
 - [Встановлення й налаштування](../installation.md): реєстрація агентів, конфігурація провайдерів, оновлення та видалення.
 - [Готовність та усунення неполадок](../installation.md#check-readiness-for-your-task): діагностика конкретного агента або рушія аналізу.
+- [GGUF / safetensors](../model-artifacts.md)
 - [CLI та Evidence](../cli.md): команди, вибір провайдера, знімки, імпорт/експорт і статуси завершення.
 - [Контракти MCP](../mcp-contracts.md) і [промпти агентів](../mcp-prompts.md): результати інструментів, сеанси й керовані дослідження.
 - [Каталог інструментів](../mcp-contracts.md#generated-catalog): створюваний під час збірки перелік інструментів, провайдерів і команд CLI.
@@ -272,7 +274,7 @@ npx rea-agents@latest setup
 
 ## Історія зірок
 
-🎉 **200 000 зірок на GitHub — дякуємо!**
+🎉 **300 000 зірок на GitHub — дякуємо!**
 
 Дякуємо всім, хто використовує REA, повідомляє про помилки, пропонує нові функції, тестує збірки й допомагає з виправленнями.
 

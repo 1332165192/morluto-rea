@@ -1,12 +1,6 @@
 import { z } from "zod";
-import { isAbsolute } from "node:path";
+import { absoluteLocalPathStringSchema } from "../localPath.js";
 
-import { localPathStringSchema } from "../localPath.js";
-
-const pathInputSchema = localPathStringSchema.refine(isAbsolute, {
-  message:
-    "Electron executable, application, and root paths must be absolute local filesystem paths (for example /Applications/Electron.app/Contents/MacOS/Electron)",
-});
 const absolutePathSchema = z
   .string()
   .min(1)
@@ -66,13 +60,13 @@ const actionSchema = z.discriminatedUnion("kind", [
 
 /** Input for one explicit, provider-owned Electron runtime experiment. */
 export const electronActiveObservationInputSchema = z.strictObject({
-  executable_path: pathInputSchema.describe(
+  executable_path: absoluteLocalPathStringSchema.describe(
     "Absolute local filesystem path for the Electron executable; relative paths are rejected.",
   ),
-  application_path: pathInputSchema.describe(
+  application_path: absoluteLocalPathStringSchema.describe(
     "Absolute local filesystem path for the Electron application; relative paths are rejected.",
   ),
-  application_root: pathInputSchema
+  application_root: absoluteLocalPathStringSchema
     .optional()
     .describe(
       "Absolute local filesystem root for application-relative paths; omit to derive it from the application path. Relative paths are rejected.",
@@ -97,6 +91,7 @@ export const electronActiveTimelineEventSchema = z.strictObject({
   kind: z.enum([
     "main-handler-invocation",
     "main-event-invocation",
+    "ipc-observation-gap",
     "utility-process-fork",
     "utility-process-message",
     "ipc-main-to-renderer",

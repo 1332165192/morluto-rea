@@ -21,6 +21,7 @@ import { comparisonLimitations } from "../domain/managed/managedMemberComparison
 import { buildManagedPeFixture as buildMultiMethodManagedPeFixture } from "../../scripts/fixtures/managed/pe.mjs";
 
 import {
+  buildManagedNestedTypeFixture,
   buildManagedPeFixture,
   buildNativePeFixture,
   fixtureUserStringHeap,
@@ -40,6 +41,55 @@ const ldstrBody = (tokens: readonly string[]): Buffer => {
   return Buffer.concat([Buffer.from([(il.length << 2) | 2]), il]);
 };
 
+describe("managed method body anchors", () => {
+  it("keeps operand-free instructions in anchors so branch comparison constants stay recoverable", () => {
+    // ldloc.s 4; ldc.i4.4; bne.un.s +0; ret. The constant this branch compares
+    // against is carried by the operand-free ldc.i4.4 opcode itself, so the
+    // anchors must retain the instruction rather than only its operand.
+    const il = Buffer.from([0x11, 0x04, 0x1a, 0x33, 0x00, 0x2a]);
+    const bytes = buildManagedPeFixture({
+      ilBody: Buffer.concat([Buffer.from([(il.length << 2) | 2]), il]),
+    });
+    const result = inspectManagedMembersBytes(
+      bytes,
+      managedPeFixtureTarget(bytes),
+    );
+
+    expect(result.methods[0]?.body.opcode_counts).toEqual({
+      "ldloc.s": 1,
+      "ldc.i4.4": 1,
+      "bne.un.s": 1,
+      ret: 1,
+    });
+    expect(result.methods[0]?.body.anchors).toEqual([
+      {
+        il_offset: 0,
+        opcode: "ldloc.s",
+        operand_kind: "variable",
+        operand: "4",
+      },
+      {
+        il_offset: 2,
+        opcode: "ldc.i4.4",
+        operand_kind: "none",
+        operand: null,
+      },
+      {
+        il_offset: 3,
+        opcode: "bne.un.s",
+        operand_kind: "branch",
+        operand: "5",
+      },
+      {
+        il_offset: 5,
+        opcode: "ret",
+        operand_kind: "none",
+        operand: null,
+      },
+    ]);
+  });
+});
+
 describe("managed member inspection", () => {
   it("keeps metadata handles distinct from calls and field accesses", () => {
     const il = Buffer.from([
@@ -55,7 +105,7 @@ describe("managed member inspection", () => {
     );
 
     expect(result.methods[0]?.body.anchors.map(({ opcode }) => opcode)).toEqual(
-      ["ldtoken", "ldtoken", "call", "ldfld"],
+      ["ldtoken", "pop", "ldtoken", "pop", "call", "ldfld", "pop", "ret"],
     );
     expect(result.call_edges.map(({ opcode }) => opcode)).toEqual(["call"]);
     expect(result.field_accesses.map(({ opcode }) => opcode)).toEqual([
@@ -118,6 +168,12 @@ describe("managed member inspection", () => {
           opcode_counts: { "ldarg.0": 1, ldfld: 1, call: 1, ret: 1 },
           anchors: [
             {
+              il_offset: 0,
+              opcode: "ldarg.0",
+              operand_kind: "none",
+              operand: null,
+            },
+            {
               il_offset: 1,
               opcode: "ldfld",
               operand_kind: "field",
@@ -128,6 +184,12 @@ describe("managed member inspection", () => {
               opcode: "call",
               operand_kind: "method",
               operand: "0x0a000001",
+            },
+            {
+              il_offset: 11,
+              opcode: "ret",
+              operand_kind: "none",
+              operand: null,
             },
           ],
         }),
@@ -525,6 +587,111 @@ describe("managed MethodSpec call targets", () => {
   });
 });
 
+describe("managed nested types", () => {
+  const inspectNested = (
+    options: Parameters<typeof buildManagedNestedTypeFixture>[0] = {},
+  ) => {
+    const bytes = buildManagedNestedTypeFixture(options);
+    return inspectManagedMembersBytes(
+      bytes,
+      managedPeFixtureTarget(bytes, "/fixture/nested.dll"),
+    );
+  };
+
+  it("reports the enclosing type of each nested type", () => {
+    const result = inspectNested();
+
+    expect(
+      result.types.map(({ full_name, enclosing_type_token }) => [
+        full_name,
+        enclosing_type_token,
+      ]),
+    ).toEqual([
+      ["<Module>", null],
+      ["Fixture.A", null],
+      ["Fixture.B", null],
+      ["Inner", "0x02000002"],
+      ["Inner", "0x02000003"],
+      ["Leaf", "0x02000004"],
+    ]);
+    expect(result.nesting_read).toBe(true);
+    expect(result.coverage.issues).toEqual([]);
+  });
+
+  it.each([2, 3, 4, 5, 6, 7])(
+    "keeps nested visibility %i unresolved when its parent entry is missing",
+    (visibility) => {
+      const bytes = buildManagedNestedTypeFixture({ nestedClassRows: [] });
+      const target = () => managedPeFixtureTarget(bytes, "/fixture/nested.dll");
+      const row = inspectManagedMembersBytes(bytes, target()).types.find(
+        (type) => type.token === "0x02000004",
+      )!.row_offset;
+      bytes.writeUInt32LE((bytes.readUInt32LE(row) & ~7) | visibility, row);
+      const result = inspectManagedMembersBytes(bytes, target());
+      expect(result.nesting_read).toBe(true);
+      expect(
+        result.types.find((type) => type.token === "0x02000004"),
+      ).toMatchObject({ enclosing_type_token: null, name_sha256: null });
+      expect(result.coverage.issues).toContainEqual(
+        expect.objectContaining({
+          code: "invalid-row",
+          scope: "metadata.TypeDef:0x02000004",
+          offset: row,
+        }),
+      );
+    },
+  );
+
+  it("retains a selected child's contradictory parent issue exactly once", () => {
+    const bytes = buildManagedNestedTypeFixture();
+    const target = () => managedPeFixtureTarget(bytes, "/fixture/nested.dll");
+    const row = inspectManagedMembersBytes(bytes, target()).types.find(
+      (type) => type.token === "0x02000004",
+    )!.row_offset;
+    bytes.writeUInt32LE((bytes.readUInt32LE(row) & ~7) | 1, row);
+    const result = inspectManagedMembersBytes(bytes, target(), {
+      typeNames: ["Leaf"],
+    });
+    expect(result.types).toHaveLength(1);
+    expect(result.types[0]?.name_sha256).toBeNull();
+    expect(result.coverage.state).toBe("partial");
+    expect(
+      result.coverage.issues.filter(
+        (issue) => issue.scope === "metadata.TypeDef:0x02000004",
+      ),
+    ).toEqual([expect.objectContaining({ code: "invalid-row", offset: row })]);
+  });
+
+  it("reports NestedClass rows that do not pair distinct existing types once", () => {
+    const result = inspectNested({
+      nestedClassRows: [
+        [4, 4],
+        [5, 3],
+        [5, 2],
+        [6, 9],
+        [0, 2],
+        [4, 0],
+        [9, 2],
+      ],
+    });
+
+    expect(
+      result.types.map(({ enclosing_type_token }) => enclosing_type_token),
+    ).toEqual([null, null, null, null, "0x02000003", null]);
+    expect(result.nesting_read).toBe(false);
+    expect(
+      result.coverage.issues.map(({ code, scope }) => [code, scope]),
+    ).toEqual([
+      ["invalid-row", "metadata.NestedClass:0x29000001"],
+      ["invalid-row", "metadata.NestedClass:0x29000003"],
+      ["invalid-row", "metadata.NestedClass:0x29000004"],
+      ["invalid-row", "metadata.NestedClass:0x29000005"],
+      ["invalid-row", "metadata.NestedClass:0x29000006"],
+      ["invalid-row", "metadata.NestedClass:0x29000007"],
+    ]);
+  });
+});
+
 describe("managed exported types", () => {
   it("reports type forwarders and nested exported types with their implementation scope", () => {
     const bytes = buildManagedPeFixture({
@@ -662,12 +829,20 @@ describe("managed user strings", () => {
       issues: [],
     });
     const body = result.methods[0]?.body;
+    // Each ldstr is followed by an operand-free pop, and ret ends the body;
+    // anchors keep those null-operand instructions too.
     expect(body?.anchors.map(({ operand }) => operand)).toEqual([
       unicode,
+      null,
       path,
+      null,
       lone,
+      null,
       path,
+      null,
       empty,
+      null,
+      null,
     ]);
     expect(body?.normalized_il_sha256).toBe(
       inspect({ ilBody }).methods[0]?.body.normalized_il_sha256,
@@ -1526,11 +1701,15 @@ it("decodes generic instantiation member signatures as complete coverage", () =>
   // shape, with TypeRef/TypeSpec coded tokens kept as encoded.
   const bytes = buildManagedPeFixture({
     methodSignature: Buffer.from([
-      0x00, 0x01, 0x01, 0x15, 0x12, 0x71, 0x01, 0x0e,
+      0x00, 0x01, 0x01, 0x15, 0x12, 0x09, 0x01, 0x0e,
     ]),
     fieldSignature: Buffer.from([
-      0x06, 0x15, 0x11, 0x0a, 0x02, 0x13, 0x00, 0x1e, 0x01,
+      0x06, 0x15, 0x11, 0x0d, 0x02, 0x13, 0x00, 0x1e, 0x01,
     ]),
+    typeReferences: [
+      { namespace: "System", name: "Func`1" },
+      { namespace: "System", name: "ValueTuple`2" },
+    ],
   });
   const result = inspectManagedMembersBytes(
     bytes,
@@ -1540,12 +1719,12 @@ it("decodes generic instantiation member signatures as complete coverage", () =>
   expect(result.methods[0]?.signature).toMatchObject({
     parse_status: "decoded",
     return_type: "void",
-    parameter_types: ["class:113<string>"],
+    parameter_types: ["class:9<string>"],
     issue: null,
   });
   expect(result.fields[0]?.signature).toMatchObject({
     parse_status: "decoded",
-    field_type: "valuetype:10<var:0,mvar:1>",
+    field_type: "valuetype:13<var:0,mvar:1>",
   });
   expect(result.coverage).toMatchObject({ state: "complete", issues: [] });
 });

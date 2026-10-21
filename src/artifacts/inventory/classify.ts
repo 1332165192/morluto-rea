@@ -1,3 +1,4 @@
+import { locateGodotPck } from "../GodotPckLocation.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
 import type { FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -5,14 +6,8 @@ import type { StableRegularFileDescriptor } from "../../filesystem/RegularFile.j
 import type { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 
 import { classifyArtifactContent } from "./ArtifactGraphConstruction.js";
-import {
-  abortIfNeeded,
-  ARTIFACT_CLASSIFICATION_PREFIX_BYTES,
-} from "../ArtifactHash.js";
-import {
-  createXmlPlistSignatureProbe,
-  MAX_XML_PLIST_PROBE_BYTES,
-} from "../../domain/apple/appleArchiveFormat.js";
+import { abortIfNeeded } from "../ArtifactHash.js";
+import { createArtifactClassificationProbe } from "../ArtifactClassificationProbe.js";
 import type { ArtifactOccurrence } from "../../domain/artifactGraph.js";
 import {
   hasZipSignature,
@@ -28,6 +23,8 @@ import {
   openRootArtifact,
 } from "./hashStableRootArtifact.js";
 import type { ArtifactInventoryOptions } from "./types.js";
+import type { FatSliceHeaderEvidence } from "../../domain/apple/machoContainer.js";
+import { readMachoHeaderPrefixFacts } from "../../domain/apple/machoContainer.js";
 
 interface RootClassification {
   readonly format: ArtifactOccurrence["artifact_format"];
@@ -66,13 +63,9 @@ export const classifyAndHashRoot = async (
       };
       const cleanupAttempt = await options.resourceScope.release(owner);
       if (cleanupAttempt.kind === "failed")
-        throw ArtifactReaderFailure.withCleanup(
-          cleanupAttempt.cause,
-          ArtifactReaderFailure.cleanupObservation(
-            cleanupAttempt.cause,
-            owner.resource,
-          ),
-        );
+        throw options.resourceScope.cleanupFailure({ kind: "completed" }, [
+          cleanupAttempt,
+        ]);
     }
     return { format: result.format, digest: result.digest };
   });
@@ -119,7 +112,9 @@ export const classifyAndHashRootForInventory = async (
       options.signal,
     );
     const retainSource =
-      isZipPackageFormat(format) || format === "mach-o-universal";
+      isZipPackageFormat(format) ||
+      format === "mach-o-universal" ||
+      format === "godot-pck";
     outcome = {
       kind: "completed",
       value: {
@@ -136,13 +131,7 @@ export const classifyAndHashRootForInventory = async (
   if (outcome.kind === "failed" || outcome.value.rootSource === undefined) {
     const cleanupAttempt = await options.resourceScope.release(owner);
     if (cleanupAttempt.kind === "failed")
-      throw ArtifactReaderFailure.withCleanup(
-        outcome.kind === "failed" ? outcome.cause : cleanupAttempt.cause,
-        ArtifactReaderFailure.cleanupObservation(
-          cleanupAttempt.cause,
-          owner.resource,
-        ),
-      );
+      throw options.resourceScope.cleanupFailure(outcome, [cleanupAttempt]);
   }
   if (outcome.kind === "failed") throw outcome.cause;
   return outcome.value;
@@ -153,41 +142,93 @@ const classifyRootFormat = async (
   handle: FileHandle,
   signal?: AbortSignal,
 ): Promise<ArtifactOccurrence["artifact_format"]> => {
-  const magic = Buffer.alloc(ARTIFACT_CLASSIFICATION_PREFIX_BYTES);
-  const observed = await handle.read(magic, 0, magic.length, 0);
-  let prefix = magic.subarray(0, observed.bytesRead);
-  const lower = path.toLowerCase();
-  if (hasZipSignature(prefix)) return zipRootPackageFormat(lower);
-  if (
-    lower.endsWith(".pkg") &&
-    prefix.subarray(0, 4).equals(Buffer.from("xar!"))
-  )
-    return "pkg";
-  if (lower.endsWith(".dmg") && (await hasKolyTrailer(handle))) return "dmg";
-  const xmlProbe = createXmlPlistSignatureProbe();
-  xmlProbe.write(prefix);
-  const chunks = [prefix];
-  let prefixBytes = prefix.length;
-  while (
-    xmlProbe.state === "pending" &&
-    prefixBytes < MAX_XML_PLIST_PROBE_BYTES
-  ) {
+  const probe = createArtifactClassificationProbe();
+  const chunk = Buffer.alloc(64 * 1024);
+  while (probe.length < probe.limit) {
     abortIfNeeded(signal);
-    const chunk = Buffer.alloc(
-      Math.min(64 * 1024, MAX_XML_PLIST_PROBE_BYTES - prefixBytes),
+    const read = await handle.read(
+      chunk,
+      0,
+      Math.min(chunk.length, probe.limit - probe.length),
+      probe.length,
     );
-    const read = await handle.read(chunk, 0, chunk.length, prefixBytes);
     abortIfNeeded(signal);
     if (read.bytesRead === 0) break;
-    const selected = chunk.subarray(0, read.bytesRead);
-    chunks.push(selected);
-    prefixBytes += selected.length;
-    xmlProbe.write(selected);
+    probe.write(chunk.subarray(0, read.bytesRead));
   }
-  prefix = Buffer.concat(chunks);
-  // ASAR is chosen from its header pickle; any other suffix is a role hint.
-  return classifyArtifactContent(path, prefix, (await handle.stat()).size)
-    .format;
+  const archiveBytes = (await handle.stat()).size;
+  const evidence = probe.finish(archiveBytes);
+  abortIfNeeded(signal);
+  const lower = path.toLowerCase();
+  if (hasZipSignature(evidence.prefix)) return zipRootPackageFormat(lower);
+  if (
+    lower.endsWith(".pkg") &&
+    evidence.prefix.subarray(0, 4).equals(Buffer.from("xar!"))
+  )
+    return "pkg";
+  if (
+    lower.endsWith(".dmg") &&
+    (await hasKolyTrailer(handle, archiveBytes, signal))
+  )
+    return "dmg";
+  if (await locateGodotPck(handle, archiveBytes, signal, evidence.prefix))
+    return "godot-pck";
+  const fatSliceHeaders = await readRootFatSliceHeaders(
+    handle,
+    evidence.fatSliceHeaders,
+    signal,
+  );
+  return classifyArtifactContent(
+    path,
+    {
+      ...evidence,
+      ...(fatSliceHeaders === undefined ? {} : { fatSliceHeaders }),
+    },
+    archiveBytes,
+  ).format;
+};
+
+/** Read exact FAT header windows missed by the bounded prefix probe. */
+const readRootFatSliceHeaders = async (
+  handle: FileHandle,
+  existing: FatSliceHeaderEvidence | undefined,
+  signal?: AbortSignal,
+): Promise<FatSliceHeaderEvidence | undefined> => {
+  if (existing === undefined) return undefined;
+  const { header } = existing;
+  const sliceHeadersByOffset = new Map(existing.sliceHeadersByOffset);
+  for (let index = 0; index < header.slices.length; index += 1) {
+    const slice = header.slices[index];
+    const observed =
+      slice === undefined ? undefined : sliceHeadersByOffset.get(slice.offset);
+    if (
+      slice === undefined ||
+      header.rangeIssues[index] !== null ||
+      slice.size < 4 ||
+      (observed !== undefined && observed.magic !== null)
+    )
+      continue;
+    const headerLength = Math.min(12, slice.size);
+    const thinHeader = Buffer.alloc(headerLength);
+    let bytesRead = 0;
+    while (bytesRead < thinHeader.length) {
+      abortIfNeeded(signal);
+      const read = await handle.read(
+        thinHeader,
+        bytesRead,
+        thinHeader.length - bytesRead,
+        slice.offset + bytesRead,
+      );
+      abortIfNeeded(signal);
+      if (read.bytesRead === 0) break;
+      bytesRead += read.bytesRead;
+    }
+    sliceHeadersByOffset.set(
+      slice.offset,
+      readMachoHeaderPrefixFacts(thinHeader.subarray(0, bytesRead)),
+    );
+  }
+  return { header, sliceHeadersByOffset };
 };
 
 /** App Pack is a verified ZIP root role; nested .app members retain their observed format. */
@@ -196,10 +237,25 @@ const zipRootPackageFormat = (lower: string): ZipPackageFormat =>
     ? "app-pack"
     : (zipPackageFormatForPath(lower) ?? "zip");
 
-const hasKolyTrailer = async (handle: FileHandle): Promise<boolean> => {
-  const size = (await handle.stat()).size;
+const hasKolyTrailer = async (
+  handle: FileHandle,
+  size: number,
+  signal?: AbortSignal,
+): Promise<boolean> => {
   if (size < 512) return false;
   const trailer = Buffer.alloc(4);
-  const read = await handle.read(trailer, 0, trailer.length, size - 512);
-  return read.bytesRead === 4 && trailer.equals(Buffer.from("koly"));
+  let bytes = 0;
+  while (bytes < trailer.length) {
+    abortIfNeeded(signal);
+    const read = await handle.read(
+      trailer,
+      bytes,
+      trailer.length - bytes,
+      size - 512 + bytes,
+    );
+    abortIfNeeded(signal);
+    if (read.bytesRead === 0) return false;
+    bytes += read.bytesRead;
+  }
+  return trailer.equals(Buffer.from("koly"));
 };

@@ -1,4 +1,8 @@
-import { apiSurfaceHar } from "../../fixtures/historicalHar.js";
+import {
+  apiSurfaceHar,
+  environmentManifestHar,
+} from "../../fixtures/historicalHar.js";
+import { inspectAnalysisView } from "../../../src/application/analysisView/AnalysisViewService.js";
 import { createHash } from "node:crypto";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,12 +18,87 @@ import {
   analysisViewCaptureFixture,
   analysisViewCaptureEvidence,
   analysisViewObjectDenseCapture,
+  analysisViewJavaScriptEvidence,
+  analysisViewJavaScriptAnalysisWithSource,
+  analysisViewNativeEvidence,
+  environmentManifestCaptureFixture,
+  environmentStateCaptureFixture,
 } from "../../fixtures/analysisView.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { ghidraFunctionDossier } from "../../../src/domain/ghidraValues.fixture.js";
 import { createEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
 import { inspectEvidenceBundle } from "../../../src/application/investigation/InspectEvidenceBundle.js";
 
+cliTest(
+  "preserves native relationship coverage independently of exhausted CLI pages",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-native-coverage-cli-");
+    const parent = analysisViewNativeEvidence({
+      status: "partial",
+      limited_directions: ["callees"],
+      limitations: ["Callees: fixture read limit"],
+      diagnostics: ["Fixture relationship diagnostic"],
+    });
+    const parentBefore = JSON.stringify(parent);
+    const request = join(root, "request.json");
+    await writeFile(
+      request,
+      JSON.stringify({
+        source: { kind: "inline", evidence: parent },
+        view: { kind: "native", facet: "callees", offset: 0, limit: 1 },
+      }),
+    );
+    const response = await cli.run({
+      arguments: ["inspect-analysis-view", request, "--json"],
+    });
+    expect(response.exitCode).toBe(0);
+    const evidence = parseEvidence(response.json);
+    expect(evidence.relationship_coverage).toEqual(
+      parent.relationship_coverage,
+    );
+    expect(evidence.normalized_result).toMatchObject({
+      item: [],
+      coverage: { total: 0, exhausted: true },
+      limitations: expect.arrayContaining(["Fixture dossier caveat"]),
+    });
+    expect(evidence.evidence_links).toEqual([parent.evidence_id]);
+    expect(JSON.stringify(parent)).toBe(parentBefore);
+  },
+);
+
+cliTest(
+  "reads typed module references through the public CLI with canonical Evidence",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-module-reference-cli-");
+    const request = join(root, "request.json");
+    const parent = analysisViewJavaScriptEvidence(
+      analysisViewJavaScriptAnalysisWithSource(),
+    );
+    const input = {
+      source: { kind: "inline", evidence: parent },
+      view: {
+        kind: "javascript",
+        collection: "modules",
+        projection: "references",
+        where: { path: "renderer.js" },
+        limit: 1,
+      },
+    };
+    const expected = inspectAnalysisView(input);
+    if (!expected.ok) throw expected.error;
+    await writeFile(request, JSON.stringify(input));
+    const response = await cli.run({
+      arguments: ["inspect-analysis-view", request, "--json"],
+    });
+    expect(response.exitCode).toBe(0);
+    const evidence = parseEvidence(response.json);
+    expect(evidence.normalized_result).toEqual(
+      expected.value.normalized_result,
+    );
+    expect(evidence.evidence_id).toBe(expected.value.evidence_id);
+    expect(evidence.evidence_links).toEqual([parent.evidence_id]);
+  },
+);
 cliTest(
   "projects opted-in query names through compiled CLI without query values",
   async ({ cli }) => {
@@ -466,5 +545,217 @@ cliTest(
     });
     expect(JSON.stringify(result.json)).not.toContain("password");
     expect(JSON.stringify(result.json)).not.toContain("ordinary");
+  },
+);
+
+cliTest(
+  "projects an environment manifest from an Evidence file through the compiled CLI",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-evidence-file-cli-");
+    const capturePath = join(root, "capture.json");
+    const parent = analysisViewCaptureEvidence(
+      environmentManifestCaptureFixture(),
+    );
+    await writeFile(capturePath, JSON.stringify(parent));
+    const requestPath = join(root, "view.json");
+    const view = {
+      kind: "environment-manifest",
+      template_rules: ["opaque-token", "sibling-pair-variance"],
+    } as const;
+    await writeFile(
+      requestPath,
+      JSON.stringify({
+        source: { kind: "evidence-file", path: capturePath },
+        view,
+      }),
+    );
+    const result = await cli.run({
+      arguments: ["inspect-analysis-view", requestPath, "--json"],
+    });
+    expect(result.exitCode, result.stdout).toBe(0);
+    const evidence = parseEvidence(result.json);
+    expect(evidence.parameters).toMatchObject({
+      parent_evidence_id: parent.evidence_id,
+    });
+    // The file source projects exactly what the same Evidence projects inline.
+    const inline = inspectAnalysisView({
+      source: { kind: "inline", evidence: parent },
+      view,
+    });
+    if (!inline.ok) throw inline.error;
+    expect(evidence.normalized_result).toEqual(inline.value.normalized_result);
+    expect(evidence.normalized_result).toMatchObject({
+      kind: "environment-manifest",
+      origin: "http://grafana.example",
+    });
+  },
+);
+
+cliTest(
+  "projects an environment manifest through the compiled CLI without recorded values",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-environment-manifest-cli-");
+    const path = join(root, "view.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        source: {
+          kind: "inline",
+          evidence: analysisViewCaptureEvidence(
+            environmentManifestCaptureFixture(),
+          ),
+        },
+        view: {
+          kind: "environment-manifest",
+          template_rules: [
+            "after-uid-literal",
+            "opaque-token",
+            "sibling-variance",
+          ],
+        },
+      }),
+    );
+    const result = await cli.run({
+      arguments: ["inspect-analysis-view", path, "--json"],
+    });
+    expect(result.exitCode, result.stdout).toBe(0);
+    const evidence = parseEvidence(result.json);
+    expect(evidence.confidence).toBe("inferred");
+    expect(evidence.normalized_result).toMatchObject({
+      kind: "environment-manifest",
+      origin: "http://grafana.example",
+      name: "grafana-example",
+      coverage: { total: 19, exhausted: true },
+      excluded: expect.arrayContaining([
+        expect.objectContaining({ reason: "other-origin" }),
+      ]),
+    });
+    for (const template of [
+      "/api/dashboards/uid/{uid}",
+      "/api/folders/{uid}",
+      "/api/plugins/{plugin_id}/settings",
+      "/api/datasources/uid/{uid}/health",
+    ])
+      expect(result.stdout).toContain(JSON.stringify(template));
+    for (const value of ["probe folder", "Main Org", "JFIF", "console.log"])
+      expect(result.stdout).not.toContain(value);
+    await writeFile(
+      path,
+      JSON.stringify({
+        source: {
+          kind: "inline",
+          evidence: analysisViewCaptureEvidence(
+            analysisViewObjectDenseCapture(),
+          ),
+        },
+        view: { kind: "environment-manifest" },
+      }),
+    );
+    const refused = await cli.run({
+      arguments: ["inspect-analysis-view", path, "--json"],
+    });
+    expect(refused.exitCode).toBe(1);
+    expect(refused.json).toMatchObject({
+      code: "resource_constraint",
+      details: { resource: "memory" },
+    });
+  },
+);
+
+cliTest(
+  "extracts an environment state through the compiled CLI with recorded values",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-environment-state-cli-");
+    const path = join(root, "view.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        source: {
+          kind: "inline",
+          evidence: analysisViewCaptureEvidence(
+            environmentStateCaptureFixture(),
+          ),
+        },
+        view: {
+          kind: "environment-state",
+          template_rules: [
+            "after-uid-literal",
+            "opaque-token",
+            "sibling-variance",
+          ],
+        },
+      }),
+    );
+    const result = await cli.run({
+      arguments: ["inspect-analysis-view", path, "--json"],
+    });
+    expect(result.exitCode, result.stdout).toBe(0);
+    const evidence = parseEvidence(result.json);
+    expect(evidence.confidence).toBe("inferred");
+    expect(evidence.normalized_result).toMatchObject({
+      kind: "environment-state",
+      origin: "http://grafana.example",
+      timeline: "recorded-start-time",
+      types: expect.arrayContaining([
+        expect.objectContaining({
+          collection_template: "/api/folders",
+          id_field: "uid",
+        }),
+      ]),
+    });
+    for (const value of ["probe folder", "probe@example.test"])
+      expect(result.stdout).toContain(value);
+  },
+);
+
+cliTest(
+  "decodes a Grafana-shaped HAR and projects its environment manifest through the compiled workflows",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-manifest-chain-cli-");
+    const capturePath = join(root, "capture.har");
+    await writeFile(capturePath, JSON.stringify(environmentManifestHar()));
+    const capture = await cli.run({
+      arguments: ["inspect-web-network-capture", capturePath, "har", "--json"],
+    });
+    expect(capture.exitCode, capture.stdout).toBe(0);
+    const parent = parseEvidence(capture.json);
+    const input = join(root, "manifest.json");
+    await writeFile(
+      input,
+      JSON.stringify({
+        source: { kind: "inline", evidence: parent },
+        view: { kind: "environment-manifest" },
+      }),
+    );
+    const result = await cli.run({
+      arguments: ["inspect-analysis-view", input, "--json"],
+    });
+    expect(result.exitCode, result.stdout).toBe(0);
+    expect(result.json).toMatchObject({
+      confidence: "inferred",
+      evidence_links: [parent.evidence_id],
+      normalized_result: {
+        kind: "environment-manifest",
+        name: "grafana-example",
+        templated_groups: 6,
+        coverage: { total: 22, exhausted: true },
+        artifact: { path: capturePath, sha256: parent.subject?.digest.sha256 },
+        records: expect.arrayContaining([
+          {
+            ordinal: 3,
+            method: "GET",
+            path: "/api/org",
+            status: 200,
+            content_type: "application/json",
+          },
+        ]),
+        unknowns: [
+          expect.objectContaining({ kind: "authorization-model" }),
+          expect.objectContaining({ kind: "response-semantics" }),
+          expect.objectContaining({ kind: "state-transition" }),
+        ],
+      },
+    });
+    expect(JSON.stringify(result.json)).not.toContain("probe folder");
   },
 );

@@ -1,55 +1,43 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 import { execFileBoundedOutput } from "../process/ExecFileBoundedOutput.js";
 import { execFileOutput } from "../process/ExecFileOutput.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { downloadHopperPackage } from "./HopperDownload.js";
 import {
-  downloadHopperPackage,
-  HOPPER_DOWNLOAD_BYTES,
-} from "./HopperDownload.js";
+  inspectLinuxHopperPythonRuntime,
+  linuxHopperPythonUnavailable,
+  LinuxHopperPythonError,
+} from "./LinuxHopperPython.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
+import { err, type Result } from "../domain/result.js";
+import {
+  HOPPER_RELEASES_URL,
+  HOPPER_PUBLIC_KEY_URL,
+  HOPPER_DOWNLOAD_PREFIX,
+  HOPPER_LINUX_PRIMARY_FINGERPRINT,
+  HopperReleaseError,
+  type LinuxHopperRelease,
+  type LinuxPackageFamily,
+} from "./HopperReleaseFeed.js";
+import {
+  LinuxHopperPublisher,
+  retryLinuxHopperPublisherCleanup,
+  type VerifiedLinuxHopperPackage,
+  type VerifiedLinuxHopperLauncher,
+} from "./LinuxHopperPublisher.js";
+
+export type { LinuxPackageFamily } from "./HopperReleaseFeed.js";
 
 /** Package-manager output retained per stream without stopping the command. */
 const PACKAGE_MANAGER_OUTPUT_BYTES = 64 * 1024;
-const DOWNLOAD_PREFIX = "https://www.hopperapp.com:443/downloader/public/";
-const SUPPORTED_HOPPER_SHA256 = new Set([
-  "0294ced141cc373468ee22d8343e7dac41980cb05a937994ca81c9f09afe7ded",
-  "1339f9e58377442b0c6fcb0dfc3cec20d593cc557408521fad9a00dbc6b8da13",
-]);
-interface LinuxHopperRelease {
-  readonly filename: string;
-  readonly file_length: string;
-  readonly file_hash: string;
-}
-const SUPPORTED_RELEASES: Readonly<
-  Record<LinuxPackageFamily, LinuxHopperRelease>
-> = {
-  deb: {
-    filename: `${DOWNLOAD_PREFIX}Hopper-6.4.2-Linux-demo.deb`,
-    file_length: "35755772",
-    file_hash: "e4f79dff602648a8ff4a88b773875b6bfac0dc65",
-  },
-  rpm: {
-    filename: `${DOWNLOAD_PREFIX}Hopper-6.4.2-Linux-demo.rpm`,
-    file_length: "32264475",
-    file_hash: "b9a65f2f583a386d440d4401d9140aef3bf305de",
-  },
-  arch: {
-    filename: `${DOWNLOAD_PREFIX}Hopper-6.4.2-Linux-demo.pkg.tar.xz`,
-    file_length: "29405968",
-    file_hash: "92d780b61cab38eda95dc4112dee4fbeb0920f46",
-  },
-};
 
-export type LinuxPackageFamily = "deb" | "rpm" | "arch";
-
-/** Exact stable external effects disclosed before a Linux Hopper installation. */
+/** Package mutations disclosed before a Linux Hopper installation. */
 export interface LinuxHopperInstallDisclosure {
-  readonly downloadUrl: string;
-  readonly expectedBytes: number;
-  readonly expectedSha1: string;
+  readonly networkOrigins: readonly string[];
+  readonly integrity: string;
   readonly commands: readonly string[];
 }
 
@@ -58,16 +46,28 @@ export const linuxHopperInstallDisclosure = (
   family: LinuxPackageFamily,
   isRoot: boolean,
 ): LinuxHopperInstallDisclosure => {
-  const release = SUPPORTED_RELEASES[family];
   return {
-    downloadUrl: release.filename,
-    expectedBytes: Number(release.file_length),
-    expectedSha1: release.file_hash,
-    commands: linuxPackageManagerCommands(
-      family,
-      `<verified-hopper.${family}>`,
-      isRoot,
-    ).map(({ executable, args }) => formatCommandForDisplay(executable, args)),
+    networkOrigins: [
+      HOPPER_RELEASES_URL,
+      HOPPER_PUBLIC_KEY_URL,
+      HOPPER_DOWNLOAD_PREFIX,
+    ],
+    integrity: `Detached PGP signature · primary ${HOPPER_LINUX_PRIMARY_FINGERPRINT} · package byte identity and installed launcher SHA-256 from the official feed`,
+    commands: [
+      ...linuxPackageManagerCommands(
+        family,
+        `<verified-hopper.${family}>`,
+        isRoot,
+      ),
+      ...(family === "deb"
+        ? [
+            debianPythonLibraryCommand(
+              "<libpython matching /usr/bin/python3, if not loadable>",
+              isRoot,
+            ),
+          ]
+        : []),
+    ].map(({ executable, args }) => formatCommandForDisplay(executable, args)),
   };
 };
 
@@ -123,16 +123,28 @@ export interface LinuxPackageInstallFailure {
 }
 
 /** Whether the package-manager step installed the verified package. */
-export type LinuxPackageInstallOutcome =
+type LinuxPackageCommandOutcome =
   | { readonly status: "installed" }
   | {
       readonly status: "failed";
       readonly failure: LinuxPackageInstallFailure;
     };
 
+export type LinuxPackageInstallOutcome =
+  | LinuxPackageCommandOutcome
+  | { readonly status: "cancelled"; readonly cause: unknown }
+  | {
+      readonly status: "runtime_unavailable";
+      readonly failure: LinuxHopperPythonError;
+    };
+
 /** External effects required to install the official Linux package. */
 export interface LinuxHopperInstallHost {
   distribution(): Promise<LinuxDistribution | undefined>;
+  release(
+    family: LinuxPackageFamily,
+    signal?: AbortSignal,
+  ): Promise<Result<LinuxHopperRelease, HopperReleaseError>>;
   download(
     url: string,
     options: { readonly signal?: AbortSignal },
@@ -142,9 +154,25 @@ export interface LinuxHopperInstallHost {
   installPackage(
     family: LinuxPackageFamily,
     archive: string,
+    options?: { readonly signal?: AbortSignal },
   ): Promise<LinuxPackageInstallOutcome>;
-  launcherStatus(path: string): Promise<LinuxHopperLauncherStatus>;
+  verifyArchive(
+    family: LinuxPackageFamily,
+    release: LinuxHopperRelease,
+    archive: string,
+    signal?: AbortSignal,
+  ): Promise<Result<VerifiedLinuxHopperPackage, HopperReleaseError>>;
+  retainVerifiedArchive(
+    verified: VerifiedLinuxHopperPackage,
+    archive: string,
+    signal?: AbortSignal,
+  ): Promise<Result<void, HopperReleaseError>>;
+  launcherStatus(
+    path: string,
+    expectedSha256: string,
+  ): Promise<LinuxHopperLauncherStatus>;
   cleanup(path: string): Promise<void>;
+  close?(): Promise<void>;
 }
 
 /** Structured outcome for every expected Linux installation failure. */
@@ -163,6 +191,9 @@ export type LinuxHopperInstallResult =
         | "launcher_missing"
         | "runtime_dependencies"
         | "unsupported_hopper_build"
+        | "publisher_verification_failed"
+        | "verification_unavailable"
+        | "cleanup_failed"
         | "cancelled";
       /**
        * The failing package-manager command and its output. Present only when
@@ -170,6 +201,12 @@ export type LinuxHopperInstallResult =
        * package manager said instead of assuming an authorization problem.
        */
       readonly packageFailure?: LinuxPackageInstallFailure;
+      /** Publisher-owned failure, retained for the public setup diagnostic. */
+      readonly verificationFailure?: HopperReleaseError;
+      /** System-interpreter inspection, kept separate from package-manager output. */
+      readonly pythonRuntimeFailure?: LinuxHopperPythonError;
+      /** Original caller cancellation, without flattening its value into text. */
+      readonly cancellationReason?: unknown;
     } & { readonly cleanupFailure?: LinuxHopperTemporaryCleanupFailure });
 
 /** Failed removal of an owned temporary install directory. */
@@ -212,7 +249,8 @@ export type LinuxHopperLauncherStatus =
   | "ready"
   | "missing"
   | "runtime_dependencies"
-  | "unsupported_hopper_build";
+  | "unsupported_hopper_build"
+  | "cleanup_failed";
 
 /** Parse an os-release document without executing its shell syntax. */
 export const parseLinuxDistribution = (text: string): LinuxDistribution => {
@@ -270,13 +308,10 @@ export const installLinuxHopper = async (
   host: LinuxHopperInstallHost = systemLinuxHopperInstallHost(process.env),
   options: {
     readonly signal?: AbortSignal;
-    readonly releases?: Readonly<
-      Record<LinuxPackageFamily, LinuxHopperRelease>
-    >;
   } = {},
 ): Promise<LinuxHopperInstallResult> => {
-  if (options.signal?.aborted === true)
-    return { status: "failed", reason: "cancelled" };
+  if (isAborted(options.signal))
+    return cancelledInstall(options.signal?.reason);
   const distribution = await host.distribution();
   if (distribution?.hopperSetupSupported !== true)
     return { status: "failed", reason: "unsupported_host" };
@@ -284,28 +319,80 @@ export const installLinuxHopper = async (
   let result: LinuxHopperInstallResult;
   try {
     result = await (async (): Promise<LinuxHopperInstallResult> => {
-      const release = (options.releases ?? SUPPORTED_RELEASES)[
-        distribution.packageFamily
-      ];
+      const selected = await host.release(
+        distribution.packageFamily,
+        options.signal,
+      );
+      if (!selected.ok)
+        return {
+          status: "failed",
+          verificationFailure: selected.error,
+          reason:
+            selected.error.reason === "cancelled"
+              ? "cancelled"
+              : "release_metadata",
+        };
+      const release = selected.value;
       const archiveDownload = await host.download(release.filename, options);
       if (!archiveDownload.ok) return { status: "failed", reason: "download" };
-      if (!packageIntegrityMatches(archiveDownload.bytes, release))
-        return { status: "failed", reason: "integrity" };
       temporary = await host.createTemporaryDirectory();
       const archive = join(temporary, `hopper.${distribution.packageFamily}`);
       await host.writeArchive(archive, archiveDownload.bytes);
+      const verified = await host.verifyArchive(
+        distribution.packageFamily,
+        release,
+        archive,
+        options.signal,
+      );
+      if (!verified.ok)
+        return {
+          status: "failed",
+          verificationFailure: verified.error,
+          reason:
+            verified.error.reason === "cache_missing"
+              ? "verification_unavailable"
+              : verified.error.reason,
+        };
+      const retained = await host.retainVerifiedArchive(
+        verified.value,
+        archive,
+        options.signal,
+      );
+      if (!retained.ok)
+        return {
+          status: "failed",
+          verificationFailure: retained.error,
+          reason:
+            retained.error.reason === "cache_missing"
+              ? "verification_unavailable"
+              : retained.error.reason,
+        };
+      if (isAborted(options.signal))
+        return cancelledInstall(options.signal?.reason);
       const install = await host.installPackage(
         distribution.packageFamily,
         archive,
+        options,
       );
+      if (install.status === "cancelled")
+        return cancelledInstall(install.cause);
       if (install.status === "failed")
         return {
           status: "failed",
           reason: "authorization_or_package_manager",
           packageFailure: install.failure,
         };
+      if (install.status === "runtime_unavailable")
+        return {
+          status: "failed",
+          reason: "runtime_dependencies",
+          pythonRuntimeFailure: install.failure,
+        };
       const launcherPath = "/opt/hopper/bin/Hopper";
-      const launcherStatus = await host.launcherStatus(launcherPath);
+      const launcherStatus = await host.launcherStatus(
+        launcherPath,
+        release.main_exe_hash,
+      );
       if (launcherStatus !== "ready")
         return {
           status: "failed",
@@ -317,9 +404,18 @@ export const installLinuxHopper = async (
   } catch (cause: unknown) {
     result = {
       status: "failed",
-      reason: isAbortCause(cause) ? "cancelled" : "download",
+      reason:
+        isAborted(options.signal) || isAbortCause(cause)
+          ? "cancelled"
+          : "download",
     };
   }
+  if (
+    result.status === "failed" &&
+    result.reason === "cancelled" &&
+    isAborted(options.signal)
+  )
+    result = { ...result, cancellationReason: options.signal?.reason };
   if (temporary === undefined) return result;
   try {
     await host.cleanup(temporary);
@@ -360,49 +456,90 @@ export const linuxHopperLauncherCandidates = (
 /** Compose package-manager and linker checks from the selected caller environment. */
 export const systemLinuxHopperInstallHost = (
   environment: Readonly<NodeJS.ProcessEnv>,
-): LinuxHopperInstallHost => ({
-  distribution: readLinuxDistribution,
-  download: downloadHopperPackage,
-  createTemporaryDirectory: () => mkdtemp(join(tmpdir(), "rea-hopper-")),
-  writeArchive: (path, bytes) => writeFile(path, bytes, { mode: 0o600 }),
-  installPackage: (family, archive) =>
-    installSystemPackage(family, archive, environment),
-  async launcherStatus(path) {
-    try {
-      await access(path);
-      const linked = await execFileOutput("ldd", [path], { env: environment });
-      if (!linuxSharedLibrariesAvailable(`${linked.stdout}\n${linked.stderr}`))
-        return "runtime_dependencies";
-      return (await linuxHopperBinarySupported(path))
-        ? "ready"
-        : "unsupported_hopper_build";
-    } catch (cause: unknown) {
-      // best-effort cleanup: optional launcher probing; unreadable means missing.
-      void cause;
-      return "missing";
-    }
-  },
-  cleanup: (path) => rm(path, { recursive: true, force: true }),
-});
-
-/** Match the Linux Hopper build validated by the packaged demo-dialog adapter. */
-export const linuxHopperBinarySupported = async (
-  path: string,
-): Promise<boolean> => {
-  try {
-    const hash = createHash("sha256");
-    for await (const chunk of createReadStream(path)) hash.update(chunk);
-    return linuxHopperLauncherDigestSupported(hash.digest("hex"));
-  } catch (cause: unknown) {
-    // best-effort cleanup: optional build probing; unreadable means unsupported.
-    void cause;
-    return false;
-  }
+): LinuxHopperInstallHost => {
+  const publisher = systemLinuxHopperPublisher(environment);
+  return {
+    distribution: readLinuxDistribution,
+    release: (family, signal) => publisher.currentRelease(family, signal),
+    download: downloadHopperPackage,
+    createTemporaryDirectory: () => mkdtemp(join(tmpdir(), "rea-hopper-")),
+    writeArchive: (path, bytes) => writeFile(path, bytes, { mode: 0o600 }),
+    installPackage: (family, archive, options) =>
+      installSystemPackage(family, archive, environment, options?.signal),
+    verifyArchive: (family, release, archive, signal) =>
+      publisher.verifyArchive(family, release, archive, signal),
+    retainVerifiedArchive: (verified, archive, signal) =>
+      publisher.retainVerifiedArchive(verified, archive, signal),
+    async launcherStatus(path, expectedSha256) {
+      try {
+        await access(path);
+        const linked = await execFileOutput("ldd", [path], {
+          env: environment,
+        });
+        if (
+          !linuxSharedLibrariesAvailable(`${linked.stdout}\n${linked.stderr}`)
+        )
+          return "runtime_dependencies";
+        return (await publisher.hashLauncher(path)) === expectedSha256
+          ? "ready"
+          : "unsupported_hopper_build";
+      } catch (cause: unknown) {
+        if (
+          cause instanceof RegularFileCleanupFailure ||
+          (cause instanceof HopperReleaseError &&
+            cause.reason === "cleanup_failed") ||
+          (cause instanceof ArtifactReaderFailure &&
+            cause.cleanup !== undefined)
+        )
+          return "cleanup_failed";
+        // best-effort cleanup: optional launcher probing; unreadable means missing.
+        void cause;
+        return "missing";
+      }
+    },
+    cleanup: (path) => rm(path, { recursive: true, force: true }),
+    close: async () => {
+      await publisher.close();
+      await retryLinuxHopperPublisherCleanup();
+    },
+  };
 };
 
-/** Match a launcher extracted from one of the pinned official Linux packages. */
-export const linuxHopperLauncherDigestSupported = (digest: string): boolean =>
-  SUPPORTED_HOPPER_SHA256.has(digest);
+export const systemLinuxHopperPublisher = (
+  environment: Readonly<NodeJS.ProcessEnv>,
+): LinuxHopperPublisher =>
+  new LinuxHopperPublisher(
+    environment,
+    async () => (await readLinuxDistribution())?.packageFamily,
+  );
+
+/** Read-only authentication; persistent package retention belongs to approved setup. */
+export const inspectLinuxHopperLauncher = async (
+  path: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  signal?: AbortSignal,
+): Promise<Result<VerifiedLinuxHopperLauncher, HopperReleaseError>> => {
+  const publisher = systemLinuxHopperPublisher(environment);
+  const result = await publisher.inspectLauncher(path, signal);
+  try {
+    await publisher.close();
+    await retryLinuxHopperPublisherCleanup();
+    return result;
+  } catch (cause: unknown) {
+    return err(
+      new HopperReleaseError(
+        "cleanup_failed",
+        "Hopper publisher verification retains incomplete cleanup.",
+        {
+          cause: new AggregateError(
+            result.ok ? [cause] : [result.error, cause],
+            "Publisher verification outcomes",
+          ),
+        },
+      ),
+    );
+  }
+};
 
 /** Interpret ldd output conservatively so a present but broken launcher is unhealthy. */
 export const linuxSharedLibrariesAvailable = (output: string): boolean =>
@@ -412,36 +549,130 @@ const installSystemPackage = async (
   family: LinuxPackageFamily,
   archive: string,
   environment: Readonly<NodeJS.ProcessEnv>,
+  signal?: AbortSignal,
 ): Promise<LinuxPackageInstallOutcome> => {
-  for (const command of linuxPackageManagerCommands(
-    family,
-    archive,
-    process.getuid?.() === 0,
-  )) {
-    const output = await execFileBoundedOutput(
-      command.executable,
-      command.args,
-      {
-        env: environment,
-        limit: PACKAGE_MANAGER_OUTPUT_BYTES,
-      },
-    );
-    if (output.exitCode !== 0) {
-      return {
+  const cancelled = (): LinuxPackageInstallOutcome => ({
+    status: "cancelled",
+    cause: signal?.reason,
+  });
+  const isRoot = process.getuid?.() === 0;
+  for (const command of linuxPackageManagerCommands(family, archive, isRoot)) {
+    if (isAborted(signal)) return cancelled();
+    // Let a running package transaction settle; do not start another after
+    // the caller cancels. Interrupting dpkg can leave configured state partial.
+    const result = await runPackageManagerCommand(command, environment);
+    if (result.status === "failed") return result;
+  }
+  if (isAborted(signal)) return cancelled();
+  if (family !== "deb") return { status: "installed" };
+
+  // Ubuntu splits the executable/stdlib from the embedding library. Resolve
+  // the installed distribution interpreter only after python3 is configured.
+  const python = await inspectLinuxHopperPythonRuntime(environment, signal);
+  if (isAborted(signal)) return cancelled();
+  if (!python.ok) return pythonInspectionFailure(python.error);
+  if (python.value.library.status === "loadable")
+    return { status: "installed" };
+  if (python.value.library.status === "unknown")
+    return {
+      status: "runtime_unavailable",
+      failure: linuxHopperPythonUnavailable(python.value.library),
+    };
+  const packageName = "libpython" + python.value.version.join(".");
+  const libraryPath = python.value.library.path;
+  // Only the standard Ubuntu shared ABI/layout establishes this APT mapping.
+  // Preserve alternate prefixes/SONAMEs as unknown instead of guessing a package.
+  if (
+    posix.basename(libraryPath) !== packageName + ".so.1.0" ||
+    !/^\/usr\/lib\/[a-z0-9_]+-linux-gnu[a-z0-9_]*$/u.test(
+      posix.dirname(libraryPath),
+    )
+  )
+    return {
+      status: "runtime_unavailable",
+      failure: new LinuxHopperPythonError(
+        "configuration_unknown",
+        "Cannot determine the matching APT runtime package for " +
+          libraryPath +
+          ". Repair this interpreter's shared runtime before retrying.",
+      ),
+    };
+  if (isAborted(signal)) return cancelled();
+  const installed = await runPackageManagerCommand(
+    debianPythonLibraryCommand(packageName, isRoot),
+    environment,
+  );
+  if (installed.status === "failed") return installed;
+  if (isAborted(signal)) return cancelled();
+  // A successful APT exit is not proof that the selected runtime can load.
+  const verified = await inspectLinuxHopperPythonRuntime(environment, signal);
+  if (isAborted(signal)) return cancelled();
+  if (!verified.ok) return pythonInspectionFailure(verified.error);
+  if (verified.value.library.status !== "loadable")
+    return {
+      status: "runtime_unavailable",
+      failure: linuxHopperPythonUnavailable(verified.value.library),
+    };
+  return { status: "installed" };
+};
+
+const isAborted = (signal: AbortSignal | undefined): boolean =>
+  signal?.aborted === true;
+
+const cancelledInstall = (cause: unknown): LinuxHopperInstallResult => ({
+  status: "failed",
+  reason: "cancelled",
+  cancellationReason: cause,
+});
+
+const pythonInspectionFailure = (
+  failure: LinuxHopperPythonError,
+): LinuxPackageInstallOutcome =>
+  failure.reason === "cancelled"
+    ? { status: "cancelled", cause: failure.cause }
+    : { status: "runtime_unavailable", failure };
+
+interface PackageCommand {
+  readonly executable: string;
+  readonly args: readonly string[];
+}
+
+const withPackagePrivilege = (
+  executable: string,
+  args: readonly string[],
+  isRoot: boolean,
+): PackageCommand =>
+  isRoot
+    ? { executable, args }
+    : { executable: "pkexec", args: [executable, ...args] };
+
+const debianPythonLibraryCommand = (
+  packageName: string,
+  isRoot: boolean,
+): PackageCommand =>
+  withPackagePrivilege("apt-get", ["install", "-y", packageName], isRoot);
+
+const runPackageManagerCommand = async (
+  command: PackageCommand,
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Promise<LinuxPackageCommandOutcome> => {
+  const output = await execFileBoundedOutput(command.executable, command.args, {
+    env: environment,
+    limit: PACKAGE_MANAGER_OUTPUT_BYTES,
+  });
+  return output.exitCode === 0
+    ? { status: "installed" }
+    : {
         status: "failed",
         failure: {
           command: formatCommandForDisplay(command.executable, command.args),
           exitCode: output.exitCode,
-          // The streams stay separate; their original interleaved order
-          // is not recoverable after capture.
+          // Preserve the separately captured streams and truncation marker.
           stdout: output.stdout,
           stderr: output.stderr,
           outputTruncated: output.outputTruncated,
         },
       };
-    }
-  }
-  return { status: "installed" };
 };
 
 /** Preserve argument boundaries in a command shown to the user. */
@@ -460,10 +691,7 @@ export const linuxPackageManagerCommands = (
   family: LinuxPackageFamily,
   archive: string,
   isRoot: boolean,
-): readonly {
-  readonly executable: string;
-  readonly args: readonly string[];
-}[] => {
+): readonly PackageCommand[] => {
   const runtimeDependencies =
     family === "deb"
       ? ["xvfb", "xauth", "python3", "libx11-6", "libxtst6"]
@@ -486,19 +714,11 @@ export const linuxPackageManagerCommands = (
             ["pacman", "-U", "--noconfirm", archive],
           ];
   return commands.map((command) => {
-    const executable = isRoot ? command[0] : "pkexec";
+    const executable = command[0];
     if (executable === undefined) throw new Error("package command is empty");
-    return { executable, args: isRoot ? command.slice(1) : command };
+    return withPackagePrivilege(executable, command.slice(1), isRoot);
   });
 };
-
-const packageIntegrityMatches = (
-  bytes: Uint8Array,
-  release: LinuxHopperRelease,
-): boolean =>
-  bytes.byteLength === Number(release.file_length) &&
-  bytes.byteLength <= HOPPER_DOWNLOAD_BYTES &&
-  createHash("sha1").update(bytes).digest("hex") === release.file_hash;
 
 const packageFamilyFor = (
   id: string,

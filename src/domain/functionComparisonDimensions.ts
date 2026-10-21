@@ -1,4 +1,5 @@
 import { canonicalJson } from "./comparisonSemantics.js";
+import { compareFunctionReferences } from "./functionReferenceComparison.js";
 import { diffLines } from "diff";
 
 import type { FunctionSnapshot } from "./functionDossierEvidence.js";
@@ -7,8 +8,6 @@ import {
   identityProjection,
   isAutoName,
   normalizeCfg,
-  referenceKindProjection,
-  referenceProjection,
   sorted,
   stringAndNameProjection,
   swiftLiteralSitesConflict,
@@ -258,44 +257,20 @@ const compareReferences = (
   right: FunctionSnapshot,
   context: ComparisonContext,
 ): FunctionDimension => {
-  const leftProjection = referenceProjection(left);
-  const rightProjection = referenceProjection(right);
-  if (leftProjection.length === 0 && rightProjection.length === 0)
-    return compareValues(
-      "references",
-      leftProjection,
-      rightProjection,
-      context,
-    );
-  if (
-    canonicalJson(leftProjection, "Function comparison") !==
-    canonicalJson(rightProjection, "Function comparison")
-  )
-    return dimensionResult({
+  const compared = compareFunctionReferences(left, right);
+  if (compared.status === "unknown")
+    return unresolvedDimension({
       dimension: "references",
-      status: "changed",
-      left: leftProjection,
-      right: rightProjection,
-      ...context,
-      leftCount: leftProjection.length,
-      rightCount: rightProjection.length,
-      textDelta: null,
-      limitations: [
-        "Reference endpoints differ independently of provider reference-kind metadata.",
-      ],
+      links: context.links,
+      leftCount: compared.leftCount,
+      rightCount: compared.rightCount,
+      limitations: compared.limitations,
     });
-  const leftKinds = referenceKindProjection(left);
-  const rightKinds = referenceKindProjection(right);
-  if (leftKinds !== null && rightKinds !== null)
-    return compareValues("references", leftKinds, rightKinds, context);
-  return unresolvedDimension({
+  return dimensionResult({
     dimension: "references",
-    links: context.links,
-    leftCount: leftProjection.length,
-    rightCount: rightProjection.length,
-    limitations: [
-      "At least one provider did not expose reference kinds, so equal endpoints do not prove equal edge semantics.",
-    ],
+    ...compared,
+    ...context,
+    textDelta: null,
   });
 };
 
@@ -333,8 +308,12 @@ const compareCalls = (
   const leftValues = callProjection(left);
   const rightValues = callProjection(right);
   const coverageLimitations = [
-    ...left.callCoverageLimitations.map((reason) => `Left: ${reason}`),
-    ...right.callCoverageLimitations.map((reason) => `Right: ${reason}`),
+    ...left.callCoverageBlockers.map((reason) => `Left: ${reason}`),
+    ...right.callCoverageBlockers.map((reason) => `Right: ${reason}`),
+  ];
+  const coverageDiagnostics = [
+    ...left.callCoverageDiagnostics.map((reason) => `Left: ${reason}`),
+    ...right.callCoverageDiagnostics.map((reason) => `Right: ${reason}`),
   ];
   if (coverageLimitations.length > 0)
     return unresolvedDimension({
@@ -342,7 +321,7 @@ const compareCalls = (
       links: context.links,
       leftCount: leftValues.length,
       rightCount: rightValues.length,
-      limitations: coverageLimitations,
+      limitations: [...coverageLimitations, ...coverageDiagnostics],
     });
   if ([...leftValues, ...rightValues].some(({ name }) => isAutoName(name)))
     return unresolvedDimension({
@@ -352,6 +331,7 @@ const compareCalls = (
       rightCount: rightValues.length,
       limitations: [
         "Address-derived callee or caller names cannot be matched safely.",
+        ...coverageDiagnostics,
       ],
     });
   return compareValues(
@@ -359,6 +339,7 @@ const compareCalls = (
     sorted(leftValues),
     sorted(rightValues),
     context,
+    coverageDiagnostics,
   );
 };
 
@@ -400,6 +381,7 @@ const compareValues = (
   left: unknown,
   right: unknown,
   context: ComparisonContext,
+  limitations: readonly string[] = [],
 ): FunctionDimension => {
   const leftJson = canonicalJson(left, "Function comparison");
   const rightJson = canonicalJson(right, "Function comparison");
@@ -412,6 +394,6 @@ const compareValues = (
     leftCount: Array.isArray(left) ? left.length : null,
     rightCount: Array.isArray(right) ? right.length : null,
     textDelta: null,
-    limitations: [],
+    limitations,
   });
 };

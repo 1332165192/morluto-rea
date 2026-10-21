@@ -61,6 +61,10 @@ const workflow = async () =>
         build: z.object({ steps: stepsSchema }),
         docs: z.object({ steps: stepsSchema }),
         static: z.object({ steps: stepsSchema }),
+        "static-deep": z.object({
+          if: z.string(),
+          steps: stepsSchema,
+        }),
       }),
     })
     .parse(
@@ -140,13 +144,18 @@ function conditionValue(
   condition: string | undefined,
   needs: Record<string, unknown>,
   canceled: boolean,
+  timingReportExists = false,
 ) {
   if (!condition) throw new Error("Missing report collection condition");
   return runInNewContext(
     condition
       .replaceAll("needs.test-shard", 'needs["test-shard"]')
       .replaceAll("needs.test-source", 'needs["test-source"]'),
-    { needs, cancelled: () => canceled },
+    {
+      needs,
+      cancelled: () => canceled,
+      hashFiles: () => (timingReportExists ? "timing-report" : ""),
+    },
     { timeout: 1_000 },
   );
 }
@@ -205,6 +214,28 @@ it("collects either fast test group while keeping full reports tied to full shar
   expect(summary?.env?.SOURCE_REQUIRED).toBe(
     "${{ needs.changes.outputs.tier == 'fast' }}",
   );
+});
+
+it("requires portable report validation even when the timing report is missing", async () => {
+  const summary = (await workflow()).test.steps.find((step) =>
+    step.run?.includes("scripts/ci/test-report.mjs"),
+  );
+  for (const tier of ["fast", "full"]) {
+    for (const timingReportExists of [false, true]) {
+      for (const code of ["true", "false"]) {
+        for (const canceled of [false, true]) {
+          expect(
+            conditionValue(
+              summary?.if,
+              { changes: { outputs: { code, tier } } },
+              canceled,
+              timingReportExists,
+            ),
+          ).toBe(code === "true" && !canceled);
+        }
+      }
+    }
+  }
 });
 
 it("keeps diagnosis available after merge failure and publishes only complete successful history", async () => {
@@ -270,6 +301,16 @@ it("rejects successful shard reports with missing or duplicate portable files", 
       readFile(join(root, ".cache/ci-test-history/test-results.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
   }
+  await run(["tests/first.test.ts", "tests/second.test.ts"]);
+  await rm(join(root, "test-timings.json"));
+  await expect(
+    executeTimingReport(root, { CI_VERIFY_TEST_INVENTORY: "true" }),
+  ).rejects.toMatchObject({
+    stderr: expect.stringContaining("ENOENT"),
+  });
+  await expect(
+    readFile(join(root, ".cache/ci-test-history/test-results.json")),
+  ).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("runs the existing onboarding and Python producer guards from their selected CI owners", async () => {
@@ -290,10 +331,26 @@ it("runs the existing onboarding and Python producer guards from their selected 
   expect(scripts["docs:check"]).toContain(
     "tests/conformance/readmeConsistency.test.ts",
   );
-  const producer = jobs.static.steps.find(
-    (step) => step.run === "npm run test:python",
+  expect(
+    jobs.static.steps.some((step) => step.run === "npm run test:python"),
+  ).toBe(false);
+  expect(
+    jobs.static.steps.some((step) => step.run === "npm run check:ci:fast"),
+  ).toBe(true);
+  const deep = jobs["static-deep"];
+  expect(deep?.if).toBe(
+    "needs.changes.outputs.tier == 'full' && needs.changes.outputs.code == 'true'",
   );
-  expect(producer?.if).toBe("needs.changes.outputs.code == 'true'");
+  expect(deep?.steps.some((step) => step.run === "npm run check:ci:deep")).toBe(
+    true,
+  );
+  expect(scripts["check:ci:deep"]).toContain("npm run test:python");
+  expect(scripts["check:ci:fast"]).toBe(
+    "node scripts/run-exclusive.mjs artifacts npm run check:ci:fast:tasks",
+  );
+  expect(scripts["check:ci:fast:tasks"]).toBe(
+    "turbo run typecheck lint:built format:check",
+  );
   expect(scripts["test:python"]).toContain(
     "bridge/native/test_rea_lldb_tracer.py",
   );

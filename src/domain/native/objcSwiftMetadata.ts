@@ -1,11 +1,22 @@
 import { z } from "zod";
+import {
+  BINARY_ARCHITECTURES,
+  isMachOFormat,
+  type BinaryTarget,
+} from "../binaryTargetTypes.js";
 import { providerSchema } from "../evidence.js";
 import { isSwiftMangledSymbolName } from "../swiftSymbolClassification.js";
+import { nativeCallReferenceSchema } from "./nativeCallReference.js";
+import { machoTargetSelectionSchema } from "../apple/machoTargetSelection.js";
 
 import {
   compareUnicodeCodePoints,
   compositeKey,
 } from "../unicodeCodePointOrder.js";
+
+/** Targets admitted to the Apple byte reader; the reader validates slice support. */
+export const isAppleDispatchMetadataTarget = (target: BinaryTarget): boolean =>
+  target.kind === "executable" && isMachOFormat(target.format);
 
 /** Objective-C method type. */
 export const objcMethodTypeSchema = z.enum([
@@ -119,6 +130,9 @@ export const nativeMetadataEvidenceSchema = z.strictObject({
   description: z.string().min(1),
   provider: providerSchema.optional(),
   location: nativeMetadataLocationSchema,
+  /** Preserve a provider's source value when it does not establish a location. */
+  reported_address: z.string().optional(),
+  call_reference: nativeCallReferenceSchema.exactOptional(),
   artifact_path: z.string().min(1).nullable().default(null),
   artifact_sha256: z
     .string()
@@ -185,10 +199,24 @@ export const objcCategorySchema = z.strictObject({
   evidence: z.array(nativeMetadataEvidenceSchema).min(1),
 });
 
+/** Exact Mach-O import binding observed at a pointer slot. */
+export const machoImportBindingSchema = z.strictObject({
+  requested_address: z.string().min(1),
+  symbol: z.string().min(1),
+  binding_source: z.enum(["chained", "bind", "weak", "lazy"]),
+  library_ordinal: z.number().int().min(-3).max(Number.MAX_SAFE_INTEGER),
+  library: z.string().nullable(),
+  weak: z.boolean(),
+  addend: z.string().regex(/^-?\d+$/u),
+});
+export type MachoImportBinding = z.infer<typeof machoImportBindingSchema>;
+
 /** Swift protocol conformance and its associated witness-table location. */
 export const swiftConformanceSchema = z.strictObject({
-  type_name: z.string().min(1),
-  protocol_name: z.string().min(1),
+  type_name: z.string().min(1).nullable(),
+  type_binding: machoImportBindingSchema.nullable().optional(),
+  protocol_name: z.string().min(1).nullable(),
+  protocol_binding: machoImportBindingSchema.nullable().optional(),
   module: z.string().nullable(),
   witness_table: nativeMetadataLocationSchema,
   location: nativeMetadataLocationSchema,
@@ -204,6 +232,7 @@ export const swiftDispatchSlotSchema = z.strictObject({
   requirement: z.string().nullable(),
   implementation: z.string().nullable(),
   implementation_address: z.string().nullable(),
+  implementation_binding: machoImportBindingSchema.nullable().optional(),
   thunk_address: z.string().nullable(),
   location: nativeMetadataLocationSchema,
   decode: nativeMetadataDecodeSchema,
@@ -217,6 +246,8 @@ export const relativePointerSchema = z.strictObject({
   displacement: z.number().int(),
   indirectable: z.boolean(),
   indirect: z.boolean().nullable(),
+  encoding_tag: z.number().int().nonnegative().optional(),
+  binding: machoImportBindingSchema.optional(),
   decode: nativeMetadataDecodeSchema,
   evidence: z.array(nativeMetadataEvidenceSchema).min(1),
 });
@@ -224,7 +255,7 @@ export const relativePointerSchema = z.strictObject({
 /** A raw Swift-mangled symbol when a provider has not decoded its metadata. */
 export const swiftSymbolSchema = z.strictObject({
   mangled_name: z.string().min(1),
-  address: z.string().min(1),
+  address: z.string().min(1).nullable(),
   decode: nativeMetadataDecodeSchema,
   evidence: z.array(nativeMetadataEvidenceSchema).min(1),
 });
@@ -238,6 +269,20 @@ export const nativeMetadataCoverageSchema = z.strictObject({
   examined: z.number().int().nonnegative(),
   decoded: z.number().int().nonnegative(),
 });
+
+export const objcClassImportIdentitySchema = machoImportBindingSchema.omit({
+  requested_address: true,
+});
+export const objcClassImportBindingCoverageSchema = z.strictObject({
+  facet: z.literal("objc_class_import_bindings"),
+  status: z.enum(["complete", "partial", "unsupported", "not_requested"]),
+  reason: z.string().nullable(),
+  examined: z.number().int().nonnegative(),
+  decoded: z.number().int().nonnegative(),
+});
+export type ObjcClassImportBindingCoverage = z.infer<
+  typeof objcClassImportBindingCoverageSchema
+>;
 
 /** Swift declaration kind. */
 export const swiftDeclKindSchema = z.enum([
@@ -307,6 +352,10 @@ export const objcSwiftMetadataSchema = z.strictObject({
   swift_conformances: z.array(swiftConformanceSchema).default([]),
   swift_dispatch_slots: z.array(swiftDispatchSlotSchema).default([]),
   swift_symbols: z.array(swiftSymbolSchema).default([]),
+  objc_class_import_bindings: z.array(machoImportBindingSchema).optional(),
+  objc_class_import_binding_coverage:
+    objcClassImportBindingCoverageSchema.optional(),
+  target_selection: machoTargetSelectionSchema.optional(),
   relative_pointers: z.array(relativePointerSchema).default([]),
   coverage: z.array(nativeMetadataCoverageSchema).default([]),
   db_save_result: dbSaveResultSchema.nullable(),
@@ -319,6 +368,7 @@ export const nativeDispatchMetadataResultSchema = z.strictObject({
     .string()
     .regex(/^[a-f0-9]{64}$/u)
     .nullable(),
+  target_architecture: z.enum(BINARY_ARCHITECTURES).nullable().optional(),
   provider: z.strictObject({
     id: z.string().min(1),
     name: z.string().min(1),
@@ -333,11 +383,15 @@ export const inspectNativeDispatchMetadata = (
   names: readonly { readonly address: string; readonly name: string }[],
   maxRecords = 5_000,
 ): ObjcSwiftMetadata => {
-  const symbolEvidence = (name: string, address: string) => [
+  const symbolEvidence = (
+    entry: (typeof names)[number],
+    address: string | null,
+  ) => [
     {
       kind: "symbol" as const,
-      description: `Provider symbol ${name}`,
+      description: `Provider symbol ${entry.name}`,
       location: { address, file_offset: null },
+      ...(address === null ? { reported_address: entry.address } : {}),
       artifact_path: null,
       artifact_sha256: null,
     },
@@ -348,6 +402,7 @@ export const inspectNativeDispatchMetadata = (
 
   const examinedNames = names.slice(0, maxRecords);
   for (const entry of examinedNames) {
+    const address = entry.address === "" ? null : entry.address;
     const classMatch = /(?:OBJC_CLASS_|OBJC_METACLASS_)\$_([^\s]+)/u.exec(
       entry.name,
     );
@@ -361,10 +416,10 @@ export const inspectNativeDispatchMetadata = (
         class_name: methodMatch[2],
         selector,
         method_type: methodType,
-        implementation_address: entry.address,
-        location: { address: entry.address, file_offset: null },
+        implementation_address: address,
+        location: { address, file_offset: null },
         decode: { status: "partial", reason: "symbol_name_only" },
-        evidence: symbolEvidence(entry.name, entry.address),
+        evidence: symbolEvidence(entry, address),
       });
       classNames.add(methodMatch[2]);
     }
@@ -372,9 +427,9 @@ export const inspectNativeDispatchMetadata = (
     if (isSwiftMangledSymbolName(entry.name) || entry.name.startsWith("_Tt"))
       swiftSymbols.push({
         mangled_name: entry.name,
-        address: entry.address,
+        address,
         decode: { status: "partial", reason: "mangled_symbol_not_demangled" },
-        evidence: symbolEvidence(entry.name, entry.address),
+        evidence: symbolEvidence(entry, address),
       });
   }
 

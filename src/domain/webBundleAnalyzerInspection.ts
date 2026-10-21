@@ -4,16 +4,19 @@ import { sanitizeEndpointCandidate } from "./browserObservation.js";
 import { compositeKey } from "./unicodeCodePointOrder.js";
 import type { WebPageInspection } from "./browserObservationSchemas.js";
 import type { WebBundleAnalysis } from "./webBundleAnalysis.js";
-import {
-  completeSemanticSteps,
-  traverseJavaScriptAst,
-} from "./javascript/javascriptSemanticTraversal.js";
-import {
-  classifyParsedJavaScriptOpenReceivers,
-  classifyParsedJavaScriptRpcClientRootsSteps,
-} from "./javascript/javascriptSemanticAnalysis.js";
+import { traverseJavaScriptAst } from "./javascript/javascriptSemanticTraversal.js";
+import { indexJavaScriptBindingsWithReceiversSteps } from "./javascript/javascriptSemanticAnalysis.js";
+import { completeSemanticSteps } from "./javascript/javascriptSemanticTraversal.js";
 import type { JavaScriptOpenReceiverFact } from "./javascript/javascriptSemanticAnalysis.js";
-import { semanticStaticPropertyName } from "./javascript/javascriptAstValues.js";
+import { isIntrinsicMapLookup } from "./javascript/javascriptSemanticMapOperations.js";
+import {
+  semanticStaticPropertyKey,
+  semanticStaticPropertyName,
+  isNullishJavaScriptSyntax,
+  staticObjectProperty,
+  staticObjectPropertyNames,
+  unwrapJavaScriptExpression,
+} from "./javascript/javascriptAstValues.js";
 import {
   calleeName,
   endpointArgument,
@@ -23,7 +26,6 @@ import {
   location,
   locationFields,
   objectString,
-  objectValue,
   resolveSpecifier,
   isUrlLikeModuleSpecifier,
 } from "./webBundleAnalyzerAst.js";
@@ -52,6 +54,7 @@ export interface AnalysisAccumulator {
   parsedScripts: number;
   readonly failedScripts: string[];
   readonly recoveredScripts: string[];
+  readonly widenedScripts: string[];
 }
 
 export const analyzeScript = (
@@ -67,15 +70,33 @@ export const analyzeScript = (
   if ((file.errors?.length ?? 0) > 0)
     accumulator.recoveredScripts.push(script.script_key);
   detectVendorFingerprints(script, accumulator);
-  const openReceiverFacts = classifyParsedJavaScriptOpenReceivers(file);
+  const index = completeSemanticSteps(
+    indexJavaScriptBindingsWithReceiversSteps(file.program),
+  );
+  completeSemanticSteps(index.indexAmbientWritesSteps());
+  const { receivers } = index;
+  const openReceiverFacts = receivers.openReceivers;
+  let mutationFactsIndexed = false;
+  const isMapLookup = (
+    node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
+  ): boolean => {
+    const proof = isIntrinsicMapLookup(node, index.bindings);
+    if (proof !== undefined) return proof;
+    if (!mutationFactsIndexed) {
+      completeSemanticSteps(index.indexMemberMutationFactsSteps());
+      mutationFactsIndexed = true;
+    }
+    return isIntrinsicMapLookup(node, index.bindings, index) === true;
+  };
   const rpc = createJavaScriptRpcScan(
     script.source.artifact.text,
-    completeSemanticSteps(classifyParsedJavaScriptRpcClientRootsSteps(file)),
+    receivers.rpcClientRoots,
+    index,
   );
   traverseJavaScriptAst(file, {
     enter: (node) => {
       accumulator.visitedNodes += 1;
-      inspectNode(script, node, accumulator, openReceiverFacts);
+      inspectNode(script, node, accumulator, openReceiverFacts, isMapLookup);
       const endpoint = rpc.inspect(node);
       if (endpoint !== undefined)
         addFinding({
@@ -88,6 +109,18 @@ export const analyzeScript = (
         });
     },
   });
+  for (const endpoint of rpc.finish())
+    if (endpoint !== undefined)
+      addFinding({
+        collection: accumulator.endpoints,
+        script,
+        rawValue: endpoint.value,
+        mechanism: endpoint.mechanism,
+        node: endpoint.node,
+        accumulator,
+      });
+  if (index.bindings.returnedReferenceWidenings.size > 0)
+    accumulator.widenedScripts.push(script.script_key);
 };
 
 const inspectNode = (
@@ -95,6 +128,9 @@ const inspectNode = (
   node: t.Node,
   accumulator: AnalysisAccumulator,
   openReceiverFacts: ReadonlyMap<number, JavaScriptOpenReceiverFact>,
+  isMapLookup: (
+    node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
+  ) => boolean,
 ): void => {
   if (
     (t.isImportDeclaration(node) || t.isExportAllDeclaration(node)) &&
@@ -132,7 +168,7 @@ const inspectNode = (
     t.isOptionalCallExpression(node) ||
     t.isNewExpression(node)
   )
-    inspectCall(script, node, accumulator, openReceiverFacts);
+    inspectCall(script, node, accumulator, openReceiverFacts, isMapLookup);
 };
 
 const inspectCall = (
@@ -140,6 +176,9 @@ const inspectCall = (
   node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
   accumulator: AnalysisAccumulator,
   openReceiverFacts: ReadonlyMap<number, JavaScriptOpenReceiverFact>,
+  isMapLookup: (
+    node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
+  ) => boolean,
 ): void => {
   const name = calleeName(node.callee);
   const first = stringValue(node.arguments[0]);
@@ -184,22 +223,48 @@ const inspectCall = (
     node.callee,
     openReceiverFacts.get(node.start ?? -1),
   );
-  if (endpoint?.kind === "candidate")
-    addEndpointCandidate(script, node, name, endpoint.value, accumulator);
-  else if (endpoint !== undefined)
+  const networkEndpoint =
+    endpoint !== undefined && !isMapLookup(node) ? endpoint : undefined;
+  if (networkEndpoint?.kind === "candidate")
+    addEndpointCandidate(
+      script,
+      node,
+      name,
+      networkEndpoint.value,
+      accumulator,
+    );
+  else if (networkEndpoint !== undefined)
     addFinding({
       collection: accumulator.endpoints,
       script,
-      rawValue: endpoint.value,
+      rawValue: networkEndpoint.value,
       mechanism: `call:${name}`,
       node,
       accumulator,
     });
-  if (
-    name.endsWith("modelContext.registerTool") ||
-    name === "modelContext.registerTool"
-  )
+  if (isWebMcpRegistrationCallee(node.callee))
     addWebMcpDeclaration(script, node, accumulator);
+};
+
+/** Match exact WebMCP receiver and method properties without flattening keys. */
+const isWebMcpRegistrationCallee = (callee: t.Node): boolean => {
+  const method = unwrapJavaScriptExpression(callee).node;
+  if (!t.isMemberExpression(method) && !t.isOptionalMemberExpression(method))
+    return false;
+  if (
+    semanticStaticPropertyKey(method.property, method.computed) !==
+    "registerTool"
+  )
+    return false;
+
+  const receiver = unwrapJavaScriptExpression(method.object).node;
+  if (t.isIdentifier(receiver, { name: "modelContext" })) return true;
+  return (
+    (t.isMemberExpression(receiver) ||
+      t.isOptionalMemberExpression(receiver)) &&
+    semanticStaticPropertyKey(receiver.property, receiver.computed) ===
+      "modelContext"
+  );
 };
 
 const inspectRouteProperty = (
@@ -302,28 +367,60 @@ const addWebMcpDeclaration = (
   if (!t.isObjectExpression(declaration)) return;
   const name = objectString(declaration, "name");
   const description = objectString(declaration, "description");
-  const schema =
-    objectValue(declaration, "inputSchema") ??
-    objectValue(declaration, "input_schema");
-  const declaredProperties = t.isObjectExpression(schema)
-    ? objectValue(schema, "properties")
-    : undefined;
-  const propertyObject = t.isObjectExpression(declaredProperties)
-    ? declaredProperties
-    : schema;
-  const schemaPropertyNames = t.isObjectExpression(propertyObject)
-    ? propertyObject.properties.flatMap((property) =>
-        t.isObjectProperty(property)
-          ? [
-              semanticStaticPropertyName(property.key, property.computed),
-            ].filter(Boolean)
-          : [],
-      )
-    : [];
+  const camelSchema = staticObjectProperty(
+    declaration,
+    "inputSchema",
+    isNullishJavaScriptSyntax,
+  );
+  const schemaProperty =
+    camelSchema.status === "missing" ||
+    (camelSchema.status === "explicit" &&
+      isNullishJavaScriptSyntax(camelSchema.property.value))
+      ? staticObjectProperty(
+          declaration,
+          "input_schema",
+          isNullishJavaScriptSyntax,
+        )
+      : camelSchema;
+  let schemaPropertyNames: readonly string[] = [];
+  let schemaPropertyNamesCoverage: NonNullable<
+    WebMcpDeclaration["schema_property_names_coverage"]
+  > = "unknown";
+  if (schemaProperty.status === "missing") {
+    schemaPropertyNamesCoverage = "not_present";
+  } else if (schemaProperty.status === "explicit") {
+    const schema = schemaProperty.property.value;
+    if (t.isObjectExpression(schema)) {
+      const propertiesProperty = staticObjectProperty(
+        schema,
+        "properties",
+        isNullishJavaScriptSyntax,
+      );
+      if (propertiesProperty.status === "missing") {
+        schemaPropertyNamesCoverage = "not_present";
+      } else if (propertiesProperty.status === "explicit") {
+        const properties = propertiesProperty.property.value;
+        if (t.isObjectExpression(properties)) {
+          const projection = staticObjectPropertyNames(
+            properties,
+            isNullishJavaScriptSyntax,
+          );
+          if (
+            projection.status === "complete" ||
+            projection.status === "partial"
+          ) {
+            schemaPropertyNames = projection.names;
+            schemaPropertyNamesCoverage = projection.status;
+          }
+        }
+      }
+    }
+  }
   const metadata = {
     name: name ?? null,
     description: description ?? null,
     schema_property_names: [...new Set(schemaPropertyNames)].sort(),
+    schema_property_names_coverage: schemaPropertyNamesCoverage,
   };
   // Deduplicate the metadata we return, preserving omission and descriptions.
   // Property names are a variable-length source-derived list: NUL-joins
@@ -415,6 +512,7 @@ export const emptyAccumulator = (): AnalysisAccumulator => ({
   parsedScripts: 0,
   failedScripts: [],
   recoveredScripts: [],
+  widenedScripts: [],
 });
 
 export const isIncludedScript = (

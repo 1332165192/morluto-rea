@@ -47,9 +47,11 @@ export class HopperTimeoutError extends HopperError {
       ? "launch"
       : "analysis",
     readonly launcherOutcome?: HopperLauncherOutcome,
+    options: AnalysisErrorOptions = {},
   ) {
     super(
       `Hopper ${operation === undefined ? "startup" : operation} timed out after ${String(timeoutMs)}ms`,
+      options,
     );
   }
 }
@@ -58,8 +60,14 @@ export class HopperTimeoutError extends HopperError {
 export class HopperCancelledError extends HopperError {
   readonly _tag = "HopperCancelledError";
 
-  constructor() {
-    super("Hopper operation was cancelled");
+  constructor(
+    cause?: unknown,
+    options: Omit<AnalysisErrorOptions, "cause"> = {},
+  ) {
+    super(
+      "Hopper operation was cancelled",
+      cause === undefined ? options : { ...options, cause },
+    );
   }
 }
 
@@ -148,23 +156,34 @@ export class HopperProcessError extends HopperError {
   }
 }
 
+/** Parsed facts about rejecting an application before execution. */
+export interface HopperLaunchRejection {
+  /** The selected application was rejected before it was executed. */
+  readonly boundary: "publisher_verification";
+  /** Parsed failure reason supplied by the verification owner. */
+  readonly reason: string;
+}
+
 /** Hopper or the repository bridge could not be started. */
 export class HopperStartError extends HopperError {
   readonly _tag = "HopperStartError";
   override readonly userMessage: string | undefined;
   readonly ownerRunId: string | undefined;
   readonly launcherFailure: HopperLauncherOutcome | undefined;
+  readonly launchRejection: HopperLaunchRejection | undefined;
 
   constructor(
-    options?: ErrorOptions & {
+    options?: AnalysisErrorOptions & {
       readonly userMessage?: string;
       readonly ownerRunId?: string;
       readonly launcherFailure?: HopperLauncherOutcome;
+      readonly launchRejection?: HopperLaunchRejection;
     },
   ) {
     super("Hopper application bridge could not be started", options);
     this.userMessage = options?.userMessage;
     this.ownerRunId = options?.ownerRunId;
     this.launcherFailure = options?.launcherFailure;
+    this.launchRejection = options?.launchRejection;
   }
 }

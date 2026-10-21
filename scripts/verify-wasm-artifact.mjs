@@ -24,6 +24,9 @@ import {
   requireMcpToolError,
 } from "./lib/mcp-verifier-results.mjs";
 import { createVerifierRun, completeVerifierRun } from "./lib/verifier-run.mjs";
+import { WABT_OPERATION_TIMEOUT_MS } from "./lib/wabt-verifier-timeouts.mjs";
+
+import { verifyWabtCleanup } from "./lib/verify-wabt-cleanup.mjs";
 
 const directory = process.env.REA_WABT_BIN_DIRECTORY;
 if (!isAbsolute(directory ?? "")) {
@@ -76,6 +79,8 @@ try {
   throw cause;
 }
 const client = new Client({ name: "wabt-artifact-verifier", version: "1" });
+const callTool = (request) =>
+  client.callTool(request, { timeout: WABT_OPERATION_TIMEOUT_MS });
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [entrypoint, "mcp"],
@@ -128,7 +133,7 @@ try {
                 TMP: childTempRoot,
                 TEMP: childTempRoot,
               },
-              timeout: 120_000,
+              timeout: WABT_OPERATION_TIMEOUT_MS,
               maxBuffer: 64 * 1024 * 1024,
             },
           )
@@ -238,7 +243,7 @@ try {
     const cliValue = await inspectCli(input);
     assert.equal(cliValue.category, undefined, JSON.stringify(cliValue));
     const cli = parseEvidence(cliValue);
-    const reply = await client.callTool({
+    const reply = await callTool({
       name: "inspect_wasm_artifact",
       arguments: input,
     });
@@ -332,7 +337,7 @@ try {
         },
       );
     }
-    const bundleReply = await client.callTool({
+    const bundleReply = await callTool({
       name: "get_evidence_bundle",
       arguments: {},
     });
@@ -362,7 +367,7 @@ try {
         JSON.stringify(cliError),
       );
       const error = requireMcpToolError(
-        await client.callTool({
+        await callTool({
           name: "inspect_wasm_artifact",
           arguments: invalidInput,
         }),
@@ -370,7 +375,7 @@ try {
       assert.equal(error.category, "invalid_input");
       const partial = error.details.partial_observation;
       assert.equal(partial.kind, "retained-evidence");
-      const failedBundleReply = await client.callTool({
+      const failedBundleReply = await callTool({
         name: "get_evidence_bundle",
         arguments: {},
       });
@@ -402,6 +407,7 @@ try {
       cases += 2;
     }
   }
+  cases += await verifyWabtCleanup(entrypoint, environment, childTempRoot);
 } catch (cause) {
   failures.push(cause);
 }

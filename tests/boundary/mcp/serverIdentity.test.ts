@@ -12,6 +12,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { machoImage } from "../../../src/artifacts/apple/MachoImage.fixture.js";
 import {
   CATALOG_IDENTITY,
+  createCatalogDigestProfiles,
   createCatalogDigests,
 } from "../../../src/catalogIdentity.js";
 import { CLI_COMMAND_NAMES } from "../../../src/cliCommandNames.js";
@@ -138,6 +139,36 @@ describe("server and catalog identity", () => {
     expect(digests.prompts_sha256).toBe(
       CATALOG_IDENTITY.digests.prompts_sha256,
     );
+  });
+
+  it("binds output schema profile and canonical output contracts into identity", () => {
+    const profiles = createCatalogDigestProfiles();
+    const changedOutput = TOOL_CONTRACTS.map((contract, index) =>
+      index === 0
+        ? {
+            ...contract,
+            outputSchema: z.strictObject({ profile_probe: z.literal(true) }),
+          }
+        : contract,
+    );
+    const changed = createCatalogDigestProfiles(changedOutput);
+    for (const input of ["full", "compact"] as const) {
+      const { full, off } = profiles[input];
+      expect(off.tools_sha256).not.toBe(full.tools_sha256);
+      expect(off.combined_sha256).not.toBe(full.combined_sha256);
+      expect(off.prompts_sha256).toBe(full.prompts_sha256);
+      for (const output of ["full", "off"] as const) {
+        expect(changed[input][output].tools_sha256).not.toBe(
+          profiles[input][output].tools_sha256,
+        );
+        expect(changed[input][output].combined_sha256).not.toBe(
+          profiles[input][output].combined_sha256,
+        );
+        expect(changed[input][output].prompts_sha256).toBe(
+          profiles[input][output].prompts_sha256,
+        );
+      }
+    }
   });
 
   it("changes catalog identity when advertised input examples change", () => {
@@ -326,7 +357,7 @@ describe("live server identity over MCP", () => {
         session.close(),
       ]);
     }
-  }, 10_000);
+  });
 
   it("compares the caller's digest against the selected compact tools/list catalog", async () => {
     const session = createTestBinarySession(availabilityProvider());
@@ -368,7 +399,7 @@ describe("live server identity over MCP", () => {
         session.close(),
       ]);
     }
-  }, 10_000);
+  });
 });
 
 describe("active-target availability over MCP", () => {
@@ -376,7 +407,11 @@ describe("active-target availability over MCP", () => {
     const session = createTestBinarySession(
       availabilityProvider(["inspect_macho", "inspect_artifact"]),
     );
-    const server = createServer({ kind: "session", session });
+    // Availability does not depend on compiling every advertised output schema.
+    const server = createServer(
+      { kind: "session", session },
+      { environment: { REA_MCP_OUTPUT_SCHEMA_PROFILE: "off" } },
+    );
     const client = new Client({ name: "availability-test", version: "1" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -426,7 +461,7 @@ describe("active-target availability over MCP", () => {
         session.close(),
       ]);
     }
-  }, 10_000);
+  });
 });
 
 const PLIST_XML =

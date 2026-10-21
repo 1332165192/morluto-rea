@@ -30,6 +30,7 @@ const environmentSchema = z.object({
     .min(1)
     .refine(isAbsolute, "REA_IDA_MCP_CONFIG must be absolute")
     .optional(),
+  REA_JEB_MCP_TIMEOUT_MS: providerStartupTimeoutSchema.optional(),
   GHIDRA_INSTALL_DIR: z
     .string()
     .min(1)
@@ -77,6 +78,27 @@ const environmentSchema = z.object({
   REA_REFERENCE_SECRET_PATTERNS_JSON: z.string().default("[]"),
 });
 
+/** Parse the JEB-only timeout at its isolated provider-composition boundary. */
+export const parseJebMcpTimeoutMs = (
+  value: string | undefined,
+): Result<number | undefined, ConfigurationError> => {
+  if (value === undefined) return ok(undefined);
+  const parsed = providerStartupTimeoutSchema.safeParse(value);
+  if (parsed.success) return ok(parsed.data);
+  return err(
+    new ConfigurationError("Invalid REA environment configuration", {
+      cause: parsed.error,
+      settings: [
+        {
+          setting: "REA_JEB_MCP_TIMEOUT_MS",
+          constraint:
+            parsed.error.issues[0]?.message ?? "must be a valid timeout",
+        },
+      ],
+    }),
+  );
+};
+
 type Environment = Omit<
   z.infer<typeof environmentSchema>,
   "HOPPER_LOADER_ARGS_JSON" | "REA_REFERENCE_SECRET_PATTERNS_JSON"
@@ -88,7 +110,30 @@ type Environment = Omit<
 /** Parse individual settings before layered registration fragments are merged. */
 export const parseEnvironmentValues = (
   environment: Readonly<Record<string, string | undefined>>,
+  unresolvedSettings: ReadonlySet<string> = new Set(),
 ): Result<Environment, ConfigurationError> => {
+  // Unknown client-specific entries are preserved by registration owners and
+  // still cross the child-process boundary. Check their byte admission before
+  // the known-setting schema strips them; never include rejected values.
+  // Cordis expression values stay unknown, but their literal names are known.
+  const keys = new Set([...Object.keys(environment), ...unresolvedSettings]);
+  const invalidEntries = [...keys]
+    .filter(
+      (key) =>
+        key.includes("\0") ||
+        (Object.hasOwn(environment, key) && environment[key]?.includes("\0")),
+    )
+    .map((setting) => ({
+      setting,
+      constraint:
+        "Environment variable names and values must not contain NUL bytes",
+    }));
+  if (invalidEntries.length > 0)
+    return err(
+      new ConfigurationError("Invalid REA environment configuration", {
+        settings: invalidEntries,
+      }),
+    );
   const parsed = environmentSchema.safeParse(environment);
   if (!parsed.success) {
     // Zod messages name the constraint, never the rejected value.
@@ -128,7 +173,7 @@ export const parseEnvironment = (
   // Registration expressions are not evaluated; their absence is not proven.
   unresolvedSettings: ReadonlySet<string> = new Set(),
 ): Result<Environment, ConfigurationError> => {
-  const parsed = parseEnvironmentValues(environment);
+  const parsed = parseEnvironmentValues(environment, unresolvedSettings);
   if (!parsed.ok) return parsed;
   const env = parsed.value;
   // Ghidra's analyzeHeadless accepts -cspec only together with -processor.

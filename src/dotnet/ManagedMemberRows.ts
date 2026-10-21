@@ -1,7 +1,7 @@
+import { jsonStringByteLength } from "../domain/jsonStringByteLength.js";
 import {
   admitManagedProjection,
   managedDecodeBudget,
-  managedJsonStringBytes,
   type ManagedDecodeBudget,
 } from "./ManagedDecodeBudget.js";
 import type { ManagedPeLayout } from "./ManagedPeReader.js";
@@ -17,6 +17,7 @@ import {
   type ManagedMemberRef,
   type ManagedMethod,
   type MemberCore,
+  type SignatureTypeName,
   type TypeRange,
 } from "./ManagedMemberInspectorCore.js";
 import {
@@ -49,7 +50,13 @@ export const parseFields = (
   layout: ManagedMetadataLayout,
   ranges: readonly TypeRange[],
   memberLists: TypeMemberListFacts,
-  selected: SelectedTypeTokens = null,
+  {
+    signatureTypeName,
+    selected = null,
+  }: {
+    readonly signatureTypeName: SignatureTypeName;
+    readonly selected?: SelectedTypeTokens;
+  },
 ): {
   readonly fields: readonly ManagedField[];
   readonly core: ReadonlyMap<string, MemberCore>;
@@ -99,7 +106,7 @@ export const parseFields = (
         declaring_type: declared?.fullName ?? null,
         name,
         flags,
-        signature: budgetedSignature(sig, layout),
+        signature: budgetedSignature(sig, layout, signatureTypeName),
       });
     }, issues);
   }
@@ -181,6 +188,7 @@ export const parseMemberRefs = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
   typeName: (token: string | null) => string | null,
+  signatureTypeName: SignatureTypeName,
 ): {
   readonly refs: readonly ManagedMemberRef[];
   readonly core: ReadonlyMap<string, MemberCore>;
@@ -232,7 +240,7 @@ export const parseMemberRefs = (
         layout.rowCounts,
       );
       const parentName = typeName(parentToken);
-      const decoded = budgetedSignature(sig, layout);
+      const decoded = budgetedSignature(sig, layout, signatureTypeName);
       refs.push({
         token,
         row_offset: cursor.start,
@@ -258,6 +266,7 @@ interface ParseMethodsInput {
   readonly layout: ManagedMetadataLayout;
   readonly pe: ManagedPeLayout;
   readonly ranges: readonly TypeRange[];
+  readonly signatureTypeName: SignatureTypeName;
   readonly memberLists: TypeMemberListFacts;
   readonly selected?: SelectedTypeTokens;
   readonly methodOffset?: number;
@@ -269,6 +278,7 @@ export const parseMethods = ({
   layout,
   pe,
   ranges,
+  signatureTypeName,
   memberLists,
   selected = null,
   methodOffset = 0,
@@ -337,7 +347,7 @@ export const parseMethods = ({
         layout.blob.size,
       );
       cursor.readIndex(layout.tableIndexSize(8));
-      const decoded = budgetedSignature(sig, layout);
+      const decoded = budgetedSignature(sig, layout, signatureTypeName);
       core.set(token, {
         ...member,
         genericArity: signatureGenericArity(decoded),
@@ -471,20 +481,21 @@ const callerName = (method: ManagedMethod): string =>
 /** JSON bytes of `callerName`, from its parts: the joining dot adds one byte. */
 const callerNameBytes = (method: ManagedMethod): number =>
   method.declaring_type === null
-    ? managedJsonStringBytes(method.name)
-    : managedJsonStringBytes(method.declaring_type) +
-      managedJsonStringBytes(method.name) -
+    ? jsonStringByteLength(method.name)
+    : jsonStringByteLength(method.declaring_type) +
+      jsonStringByteLength(method.name) -
       1;
 
 const budgetedSignature = (
   bytes: Buffer,
   layout: ManagedMetadataLayout,
+  signatureTypeName: SignatureTypeName,
 ): ReturnType<typeof signature> => {
   const budget = managedDecodeBudget(layout);
   budget.admitTransient(bytes.length * 256, layout.blob.offset);
   try {
     return admitManagedProjection(
-      signature(bytes, budget.digest(bytes, "sha256")),
+      signature(bytes, budget.digest(bytes, "sha256"), signatureTypeName),
       budget,
     );
   } finally {

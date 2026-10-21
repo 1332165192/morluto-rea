@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { parse } from "plist";
 
-import { omitPrototypeKeys, parseXmlPropertyList } from "./propertyListKeys.js";
+import {
+  omitPrototypeKeys,
+  parseXmlPropertyList as parseWithNumbers,
+} from "./propertyListKeys.js";
+
+// Existing key/omission controls assert those facts exactly; numeric facts
+// have separate source-type and ambiguity controls below.
+const parseXmlPropertyList = (text: string) => {
+  const { numberLiterals: _numbers, ...parsed } = parseWithNumbers(text);
+  return parsed;
+};
 
 const plist = (body: string) =>
   `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0">${body}</plist>`;
@@ -40,9 +50,9 @@ it("keeps __proto__ text in strings, comments, and similar keys", () => {
   });
 });
 
-it("keeps an entity-encoded key that decodes to the placeholder", () => {
+it("keeps a segmented entity-encoded key that decodes to the placeholder", () => {
   const text = plist(
-    "<dict><key>&#95;&#95;rea_prototype_key__</key><string>kept</string><key>__proto__</key><string>x</string></dict>",
+    "<dict><key>&#95;&#95;rea<![CDATA[_prototype_key__]]></key><string>kept</string><key>__proto__</key><string>x</string></dict>",
   );
   expect(parseXmlPropertyList(text)).toEqual({
     value: { __rea_prototype_key__: "kept" },
@@ -70,13 +80,72 @@ it("omits own __proto__ entries that JSON decoding creates", () => {
   });
 });
 
-it("preserves the pinned decoder's first-child key semantics", () => {
+it("omits complete prototype keys split across character-data nodes", () => {
   const text = plist(
     "<dict><key>__pro<![CDATA[to__]]></key><string>kept</string><key>__proto__</key><string>omitted</string></dict>",
   );
   expect(parseXmlPropertyList(text)).toEqual({
-    value: { __pro: "kept" },
+    value: {},
     omittedPrototypeKeys: 1,
+  });
+});
+
+it("preserves literal key text, XML characters and encoded line endings across segments", () => {
+  const text = plist(
+    '<dict><key note="&gt;">pre<![CDATA[&amp;</key>]]><!-- ignored -->&#13;&#x85;&#x2028;]]&gt;post</key><string>a&#13;b</string></dict>',
+  );
+  expect(parseXmlPropertyList(text)).toEqual({
+    value: { "pre&amp;</key>\r\u0085\u2028]]>post": "a\rb" },
+    omittedPrototypeKeys: 0,
+  });
+});
+
+it("does not infer key identity from nested elements", () => {
+  expect(
+    parseXmlPropertyList(
+      plist(
+        "<dict><key>pre<string>nested</string></key><string>kept</string><key>__proto__<string>nested</string></key><string>omitted</string></dict>",
+      ),
+    ),
+  ).toEqual({ value: { pre: "kept" }, omittedPrototypeKeys: 1 });
+});
+
+it.each([
+  ["ab", "a<![CDATA[b]]>", "ab"],
+  ["a<![CDATA[b]]>", "ab", "a<![CDATA[b]]>"],
+  ["ab", "a<!-- comment -->b", "ab"],
+])("retains last-value-wins for mixed spellings %j", (...keys) => {
+  const entries = keys
+    .map(
+      (key, index) =>
+        `<key>${key}</key><integer>${String(index + 1)}</integer>`,
+    )
+    .join("");
+  expect(parseXmlPropertyList(plist(`<dict>${entries}</dict>`))).toEqual({
+    value: { ab: 3 },
+    omittedPrototypeKeys: 0,
+  });
+});
+
+it("keeps empty keys and alias-looking source keys distinct", () => {
+  const entries =
+    "<key/><integer>1</integer><key><!-- ignored --></key><integer>2</integer>" +
+    "<key></key><integer>3</integer><key>__rea_plist_key_0__</key><string>literal</string>" +
+    "<key>ma<?ignored value?><![CDATA[in]]></key><integer>42</integer>";
+  expect(parseXmlPropertyList(plist(`<dict>${entries}</dict>`))).toEqual({
+    value: { "": 3, __rea_plist_key_0__: "literal", main: 42 },
+    omittedPrototypeKeys: 0,
+  });
+});
+
+it.each([
+  "<key>ma<![CDATA[in]]></key>",
+  "<array><key>ma<![CDATA[in]]></key><string>__rea_plist_key_0__</string></array>",
+])("does not alias key elements used as scalar values in %s", (body) => {
+  const text = plist(body);
+  expect(parseXmlPropertyList(text)).toEqual({
+    value: parse(text),
+    omittedPrototypeKeys: 0,
   });
 });
 
@@ -96,6 +165,40 @@ it("preserves OpenStep dictionary and array autodetection", () => {
   expect(parseXmlPropertyList("(one, two)")).toEqual({
     value: ["one", "two"],
     omittedPrototypeKeys: 0,
+  });
+});
+
+it("counts OpenStep __proto__ keys the decoder silently drops", () => {
+  // Unquoted, quoted, escape-spelled, and object-valued keys all decode to
+  // __proto__; values, other keys, and `\137` (decoded as "137") do not.
+  const result = parseXmlPropertyList(
+    '{ __proto__ = a; "__proto__" = b; "\\_\\_proto__" = c; ' +
+      'nested = { "__proto__" = { polluted = yes; }; }; ' +
+      'kept = __proto__; list = (__proto__); "\\137_proto__" = d; }',
+  );
+  expect(result).toEqual({
+    value: {
+      nested: {},
+      kept: "__proto__",
+      list: ["__proto__"],
+      "137_proto__": "d",
+    },
+    omittedPrototypeKeys: 4,
+  });
+  const nested = (result.value as { nested: object }).nested;
+  expect(Object.getPrototypeOf(nested)).toBe(Object.prototype);
+});
+
+it("counts OpenStep compound keys that coerce to __proto__", () => {
+  // `obj[key]` coerces an array key to its comma-joined string.
+  expect(
+    parseXmlPropertyList(
+      '{ (__proto__) = a; (("__proto__")) = b; ("__pro", "to__") = c; ' +
+        "list = (__proto__); }",
+    ),
+  ).toEqual({
+    value: { "__pro,to__": "c", list: ["__proto__"] },
+    omittedPrototypeKeys: 2,
   });
 });
 

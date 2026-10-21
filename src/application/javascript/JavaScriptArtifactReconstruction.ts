@@ -20,6 +20,10 @@ import type { ArtifactInventorySnapshot } from "../../domain/artifactInventorySn
 import type { ArtifactInventoryPartialObservation } from "../../domain/artifactPartialObservation.js";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { analyzeAndAdoptJavaScriptArtifactFiles } from "./JavaScriptArtifactAnalysis.js";
+import {
+  isSkippedJavaScriptAnalysis,
+  javascriptArtifactAnalysisScopes,
+} from "./JavaScriptArtifactAnalysisTypes.js";
 import { createJavaScriptSourceAnalysis } from "../../artifacts/javascript/JavaScriptSourceAnalysis.js";
 import { JAVASCRIPT_ANALYSIS_RESOURCE_DEFAULTS } from "../../domain/javascript/javascriptAnalysisResourceControls.js";
 import { createOwnedJavaScriptApplicationEvidenceCooperatively } from "./JavaScriptApplicationEvidence.js";
@@ -56,6 +60,7 @@ export interface JavaScriptArtifactReconstructionResult {
     readonly text_bytes_read: number;
     readonly invalid_utf8_files: number;
     readonly parsed_javascript_files: number;
+    readonly skipped_javascript_files: number;
     readonly visited_ast_nodes: number;
     readonly findings: number;
     readonly modules: number;
@@ -137,9 +142,15 @@ export const reconstructJavaScriptArtifact = async (
         );
       await reportPhase(
         "parse_javascript_sources",
-        `Parsing and projecting ${String(files.files.length - (files.source_selection?.unselected_files ?? 0))} selected application source files`,
+        `Processing ${String(files.files.length - (files.source_selection?.unselected_files ?? 0))} selected application files`,
       );
       const semanticProjection = createJavaScriptSemanticGraphProjection({
+        ...(input.max_semantic_unknowns === undefined
+          ? {}
+          : { totalUnknowns: input.max_semantic_unknowns }),
+        ...(input.max_semantic_unknowns_per_file === undefined
+          ? {}
+          : { fileUnknowns: input.max_semantic_unknowns_per_file }),
         ...(input.max_semantic_nodes === undefined
           ? {}
           : { totalNodes: input.max_semantic_nodes }),
@@ -168,11 +179,16 @@ export const reconstructJavaScriptArtifact = async (
           semanticProjection,
           async (file, completed, total) => {
             abortIfNeeded(signal);
+            const ast =
+              javascriptArtifactAnalysisScopes[file.kind]?.authority ===
+              "ast-static-analysis";
             await progress?.report({
-              phase: "parse_javascript_source",
+              phase: ast
+                ? "parse_javascript_source"
+                : "process_javascript_artifact_metadata",
               completed: 0,
               total: 1,
-              message: `Parsing and projecting ${file.path} (${String(completed + 1)}/${String(total)})`,
+              message: `${ast ? "Parsing and projecting" : "Processing metadata for"} ${file.path} (${String(completed + 1)}/${String(total)})`,
             });
             abortIfNeeded(signal);
           },
@@ -269,6 +285,9 @@ export const reconstructJavaScriptArtifact = async (
           parsed_javascript_files: analysis.files.filter(
             ({ javascript }) => javascript !== null,
           ).length,
+          skipped_javascript_files: analysis.files.filter(
+            isSkippedJavaScriptAnalysis,
+          ).length,
           visited_ast_nodes: analysis.visited_ast_nodes,
           findings: analysis.findings,
           modules: analysis.modules,
@@ -324,8 +343,9 @@ export const reconstructJavaScriptArtifact = async (
 const OPERATION = "analyze_javascript_application";
 
 /**
- * Resolve the caller-selected input. A missing or unreadable selection is a
- * caller or host-permission failure, not a damaged artifact.
+ * Resolve the caller-selected input. A missing, looping, overlong, or
+ * unreadable selection is a caller or host-resolution failure, not a damaged
+ * artifact.
  */
 const resolveSelectedInput = async (inputPath: string): Promise<string> => {
   try {
@@ -347,9 +367,25 @@ const resolveSelectedInput = async (inputPath: string): Promise<string> => {
           message: `No file or directory exists at the selected input path (${code}): ${inputPath}`,
         },
       ]);
+    if (code === "ELOOP" || code === "ENAMETOOLONG")
+      throw new AnalysisInputError(OPERATION, { cause }, [
+        {
+          path: ["input_path"],
+          reason: "invalid_value",
+          message: selectedInputResolutionMessage(code, inputPath),
+        },
+      ]);
     throw cause;
   }
 };
+
+const selectedInputResolutionMessage = (
+  code: "ELOOP" | "ENAMETOOLONG",
+  inputPath: string,
+): string =>
+  code === "ENAMETOOLONG"
+    ? `Selected input path exceeds the host path or component length limit (ENAMETOOLONG): ${inputPath}`
+    : `Selected input path could not be resolved because symbolic-link traversal looped or exceeded the host limit (ELOOP): ${inputPath}`;
 
 /** The selected input's kind, checked against the caller's requested format. */
 const resolveFormat = async (

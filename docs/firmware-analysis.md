@@ -153,10 +153,22 @@ tree semantics, vulnerability scanning, emulation or hardware runtime capture.
 ## Resource and lifecycle policy
 
 - Nonempty regular firmware inputs: at most **128 MiB**, copied and hashed into
-  a private workspace before analysis. No in-place source modification.
+  a private workspace before analysis. Growth beyond that allowance during
+  copying receives the same typed input refusal as an already oversized file.
+  Supply a stable copy within the allowance. No in-place source modification.
 - One queued heavy operation per provider instance; Binwalk one thread and
   Unblob one worker. No automatic parallel extraction engines.
-- **120-second** deadline; inherited **1 GiB per-process address-space** limit,
+- **120-second** analysis deadline through inventory. Publication and final
+  cleanup start a separate **120-second** budget; select
+  `publication_timeout_ms` in MCP or `--publication-timeout-ms` in CLI for a slow
+  destination. Valid budgets are integers from 1 through 2,147,483,647 ms (the
+  timer representation limit). Publication timeouts identify their phase and
+  verified file progress; verified writes before atomic commit are not a claim
+  that output remains published after rollback. Caller cancellation applies to
+  both phases and final cleanup. Phase handoff, publication commit and final
+  completion also check monotonic elapsed time, so delayed timer callbacks
+  cannot revive an expired budget.
+- Inherited **1 GiB per-process address-space** limit,
   120 CPU seconds and zero core-dump allowance through `prlimit`.
 - JSON reports: at most **8 MiB** and valid UTF-8; malformed encoding and
   oversized reports fail without repairing or truncating producer data.

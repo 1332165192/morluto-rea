@@ -4,6 +4,7 @@ import {
   recordWorkflowUnknowns,
   createWorkflowEvidence,
   executeComposedWorkflow,
+  workflowSnapshotRecord,
 } from "./WorkflowEvidence.js";
 import { InvestigationRecords } from "./investigation/InvestigationRecords.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
@@ -17,6 +18,54 @@ import { nativeApiBoundarySchema } from "../domain/native/nativeApiBoundary.js";
 import { projectNativeApiInspection } from "./native/NativeApiInspection.js";
 import { functionDossierSchema } from "../domain/hopperValues.js";
 import { ghidraFunctionDossier } from "../domain/ghidraValues.fixture.js";
+import { ANALYSIS_SNAPSHOT_PROFILE } from "../domain/analysisSnapshot.fixture.js";
+
+it.each([false, true])(
+  "propagates transient=%s through composed snapshot decisions while retaining Evidence",
+  async (transient) => {
+    let calls = 0;
+    const composed = await executeComposedWorkflow(
+      {
+        execute: async () =>
+          ok(
+            createAnalysisExecution(
+              "observed",
+              provider,
+              transient && calls++ === 0
+                ? { cachePolicy: "live" as const }
+                : {},
+            ),
+          ),
+      },
+      async (observed) => {
+        await observed.execute("analyze_function", { procedure: "0x1000" });
+        const last = await observed.execute("procedure_info", {
+          procedure: "0x1000",
+        });
+        return last.ok ? ok(last.value.result) : last;
+      },
+    );
+    if (!composed.ok) throw composed.error;
+    const evidence = createWorkflowEvidence({
+      target: undefined,
+      operation: "inspect_native_api",
+      parameters: {},
+      result: composed.value.result,
+      upstreamProfile: ANALYSIS_SNAPSHOT_PROFILE,
+      upstreamLimitations: composed.value.limitations,
+    });
+    expect(new InvestigationRecords().recordEvidence(evidence).ok).toBe(true);
+    expect(
+      workflowSnapshotRecord(
+        evidence,
+        "inspect_native_api",
+        ANALYSIS_SNAPSHOT_PROFILE,
+        composed.value.cachePolicy,
+      ) === undefined,
+    ).toBe(transient);
+    expect(evidence.normalized_result).toBe("observed");
+  },
+);
 
 const provider = { id: "fixture", name: "Fixture", version: "1" };
 
@@ -95,16 +144,18 @@ it("retains unique upstream limits in canonical order across concurrent observat
   let calls = 0;
   const options = { signal: new AbortController().signal };
   const analysis: AnalysisOperationPort = {
-    execute: async (_, parameters, forwarded) => {
+    execute: async (operation, parameters, forwarded) => {
       expect(parameters).toEqual({ marker: true });
       expect(forwarded).toBe(options);
       const call = calls++;
       if (call === 0) await gate;
       else release();
+      const limitation =
+        operation === "list_strings"
+          ? ["first", "shared"]
+          : ["second", "shared"];
       return ok(
-        createAnalysisExecution([], provider, {
-          limitations: call === 0 ? ["first", "shared"] : ["second", "shared"],
-        }),
+        createAnalysisExecution([], provider, { limitations: limitation }),
       );
     },
   };
@@ -117,7 +168,48 @@ it("retains unique upstream limits in canonical order across concurrent observat
   });
   expect(calls).toBe(2);
   expect(result).toEqual(
-    ok({ result: { count: 0 }, limitations: ["first", "second", "shared"] }),
+    ok({
+      result: { count: 0 },
+      limitations: [
+        "Fixture (fixture 1) list_procedures, list_strings: shared",
+        "Fixture (fixture 1) list_procedures: second",
+        "Fixture (fixture 1) list_strings: first",
+      ],
+    }),
+  );
+});
+
+it("deduplicates exact source caveats without merging providers or operations", async () => {
+  const firstProvider = { id: "first", name: "First", version: "1" };
+  const secondProvider = { id: "second", name: "Second", version: "1" };
+  const result = await executeComposedWorkflow(
+    {
+      execute: async (operation, parameters) =>
+        ok(
+          createAnalysisExecution(
+            null,
+            parameters.provider === "second" ? secondProvider : firstProvider,
+            { limitations: ["same source caveat"] },
+          ),
+        ),
+    },
+    async (observed) => {
+      await observed.execute("list_strings", { provider: "first" });
+      await observed.execute("list_strings", { provider: "first" });
+      await observed.execute("list_strings", { provider: "second" });
+      await observed.execute("list_procedures", { provider: "first" });
+      return ok({ count: 0 });
+    },
+  );
+
+  expect(result).toEqual(
+    ok({
+      result: { count: 0 },
+      limitations: [
+        "First (first 1) list_procedures, list_strings: same source caveat",
+        "Second (second 1) list_strings: same source caveat",
+      ],
+    }),
   );
 });
 
@@ -169,12 +261,53 @@ describe("workflow residual question retention", () => {
     expect(recordWorkflowUnknowns(input).ok).toBe(true);
     expect(records.listUnknowns()).toMatchObject([
       {
-        question: result.residual_unknowns[0],
+        question: `${result.residual_unknowns[0]} (Evidence ${evidence.evidence_id})`,
         domain: "native-api",
         supporting_evidence_ids: [evidence.evidence_id],
         required_authority: "shipped-artifact",
       },
     ]);
+  });
+
+  it("retains one identical residual question per distinct workflow Evidence", () => {
+    const records = new InvestigationRecords();
+    const result = {
+      residual_unknowns: ["Which provider resolves this boundary?"],
+    };
+    const evidence = ["0x1000", "0x2000"].map((procedure) =>
+      createWorkflowEvidence({
+        target: undefined,
+        operation: "inspect_native_api",
+        parameters: { procedure },
+        result,
+        upstreamProfile: undefined,
+        upstreamLimitations: [],
+      }),
+    );
+    expect(evidence[0]?.evidence_id).not.toBe(evidence[1]?.evidence_id);
+
+    for (const item of evidence) {
+      expect(records.recordEvidence(item).ok).toBe(true);
+      const input = {
+        name: "inspect_native_api",
+        result,
+        evidenceId: item.evidence_id,
+        recordUnknown: (
+          unknown: Parameters<InvestigationRecords["recordUnknown"]>[0],
+        ) => records.recordUnknown(unknown),
+      };
+      expect(recordWorkflowUnknowns(input).ok).toBe(true);
+      expect(recordWorkflowUnknowns(input).ok).toBe(true);
+    }
+
+    expect(records.listUnknowns()).toHaveLength(2);
+    expect(
+      records
+        .listUnknowns()
+        .map(({ supporting_evidence_ids }) => supporting_evidence_ids),
+    ).toEqual(
+      expect.arrayContaining(evidence.map(({ evidence_id }) => [evidence_id])),
+    );
   });
 
   it.each([
@@ -205,7 +338,7 @@ describe("workflow residual question retention", () => {
         }).ok,
       ).toBe(true);
       expect(records.listUnknowns()).toMatchObject([
-        { question: "Which boundary?" },
+        { question: `Which boundary? (Evidence ${evidence.evidence_id})` },
       ]);
       expect(evidence.normalized_result).toEqual(result);
     },
@@ -285,7 +418,7 @@ it.each([
       }).ok,
     ).toBe(true);
     expect(records.listUnknowns()).toMatchObject([
-      { question: "Which boundary?" },
+      { question: `Which boundary? (Evidence ${evidence.evidence_id})` },
     ]);
     expect(records.evidenceById(evidence.evidence_id)).toEqual(evidence);
     expect(evidence.normalized_result).toMatchObject({

@@ -1,6 +1,54 @@
 import { expect, it } from "vitest";
 
 import { analyzeJavaScriptStaticSource } from "./javascriptStaticAnalysis.js";
+import { indexJavaScriptBindingsSteps } from "./javascriptSemanticAnalysis.js";
+import { completeSemanticSteps } from "./javascriptSemanticTraversal.js";
+import { parseJavaScriptSource } from "./javascriptSourceParser.js";
+
+it("keeps wrapper module aliases distinct from global-object module properties", () => {
+  const parsed = parseJavaScriptSource(
+    `
+    const wrapper = module;
+    Object.defineProperty(wrapper, "exports", { value: exports });
+    Object.defineProperty(globalThis.module, "exports", { value: exports });
+  `,
+    "app.cjs",
+  );
+  if (parsed === null) throw new Error("Expected parsed source");
+  const state = completeSemanticSteps(
+    indexJavaScriptBindingsSteps(parsed.program),
+  );
+  expect(state.ambientWriteEffects.map(({ path }) => path)).toEqual([
+    ["commonjs-module", "exports"],
+    ["global", "module", "exports"],
+  ]);
+});
+
+it.each([
+  ["const copy={...module};consume(copy);", false],
+  ["const copy={...{child:module}};consume(copy);", true],
+  [
+    "const original={child:module};const copy={...original};consume(copy);",
+    true,
+  ],
+])(
+  "exposes copied children without escaping the source container: %s",
+  (body, moduleEscaped) => {
+    const parsed = parseJavaScriptSource(`function copy(){${body}}`);
+    if (parsed === null) throw new Error("Expected copied escape fixture");
+    const state = completeSemanticSteps(
+      indexJavaScriptBindingsSteps(parsed.program),
+    );
+    expect(
+      state.ambientEscapeEffects.some(
+        ({ path }) =>
+          path.length === 2 &&
+          path[0] === "commonjs-module" &&
+          path[1] === null,
+      ),
+    ).toBe(moduleEscaped);
+  },
+);
 
 it.each([
   {
