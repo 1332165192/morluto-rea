@@ -155,7 +155,8 @@ export const parseEvidenceFile = (
   }
 };
 
-const recordedExchange = (
+/** One capture record reduced to its request line and retained response body, or undefined without a request line. */
+export const recordedExchange = (
   record: WebNetworkCaptureRecord,
 ): RecordedExchange | undefined => {
   const line = readRecordedRequestLine(record.reported, true, () => true);
@@ -213,16 +214,21 @@ export const parseViewEvidence = <Kind extends AnalysisViewResult["kind"]>(
   });
 };
 
-/** Authenticate the evidence file and require complete capture Evidence of either kind. */
-const parseCaptureEvidence = (
+/** Authenticate the evidence file and require complete capture Evidence of either kind; a browser capture's request bodies are kept only for the manifest purpose. */
+export const parseCaptureEvidence = (
   operation: string,
   value: unknown,
+  purpose: "manifest" | "replay" = "replay",
 ): Result<
   {
     readonly records: readonly WebNetworkCaptureRecord[];
     readonly evidenceId: string;
     readonly captureKind: EnvironmentCaptureKind;
     readonly captureSha256: string | null;
+    /** Whether the capture recorded response bodies: a browser scenario does only when they were selected. */
+    readonly responseBodies: boolean;
+    /** Whether the capture recorded request bodies, likewise. */
+    readonly requestBodies: boolean;
   },
   AnalysisError
 > => {
@@ -240,12 +246,14 @@ const parseCaptureEvidence = (
       .safeParse(evidence.value.parameters);
     if (scenario.success)
       return ok({
-        records: scenarioCaptureRecords(scenario.data, "replay").records,
+        records: scenarioCaptureRecords(scenario.data, purpose).records,
         evidenceId,
         captureKind: "browser-scenario",
         captureSha256: definition.success
           ? definition.data.scenario_sha256
           : null,
+        responseBodies: scenario.data.scenario.network_content.response_body,
+        requestBodies: scenario.data.scenario.network_content.request_body,
       });
   } else if (evidence.value.operation === "inspect_web_network_capture") {
     const records = immutableJsonSnapshotMember(normalized, "records");
@@ -278,6 +286,8 @@ const parseCaptureEvidence = (
         evidenceId,
         captureKind: "web-network-capture",
         captureSha256: capture.data.artifact.sha256,
+        responseBodies: true,
+        requestBodies: true,
       });
     }
   }
