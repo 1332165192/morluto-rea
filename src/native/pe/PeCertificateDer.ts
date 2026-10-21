@@ -113,6 +113,22 @@ export const oidName = (oid: string): string | null => OID_NAMES[oid] ?? null;
 export const MAX_OID_BYTES = 256;
 export const MAX_OID_ARC_BYTES = 32;
 
+// One PKCS#7 payload shares this ceiling. Real issuer and subject names are
+// far smaller; the cap stops one wide string from occupying the file budget.
+export const MAX_DECODED_NAME_BYTES = 65_536;
+
+interface DecodedNameBudget {
+  remaining: number;
+}
+
+const chargeDecodedName = (budget: DecodedNameBudget, bytes: number): void => {
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > budget.remaining)
+    fail(
+      `Certificate name text exceeds the ${String(MAX_DECODED_NAME_BYTES)}-byte decoded budget.`,
+    );
+  budget.remaining -= bytes;
+};
+
 /** Decode an OBJECT IDENTIFIER content buffer as dotted decimal. */
 export const decodeOid = (content: Buffer): string => {
   if (content.length === 0) return fail("Empty OBJECT IDENTIFIER.");
@@ -144,41 +160,64 @@ export const decodeOid = (content: Buffer): string => {
   return [first, combined - first * 40n, ...rest].join(".");
 };
 
-const decodeUtf16Be = (bytes: Buffer): string => {
+const decodeUtf16Be = (bytes: Buffer, budget: DecodedNameBudget): string => {
   if (bytes.length % 2 !== 0) return fail("BMPString length is odd.");
-  let text = "";
-  for (let index = 0; index < bytes.length; index += 2)
-    text += String.fromCharCode(bytes.readUInt16BE(index));
-  return text;
+  // Charge before the copy. Appending one character at a time retains a
+  // cons-string chain of about sixteen heap bytes per source byte.
+  chargeDecodedName(budget, bytes.length);
+  if (bytes.length === 0) return "";
+  const decoded = Buffer.allocUnsafe(bytes.length);
+  for (let index = 0; index < bytes.length; index += 2) {
+    decoded[index] = bytes[index + 1] ?? 0;
+    decoded[index + 1] = bytes[index] ?? 0;
+  }
+  return decoded.toString("utf16le");
 };
 
-const decodeUtf32Be = (bytes: Buffer): string => {
+const decodeUtf32Be = (bytes: Buffer, budget: DecodedNameBudget): string => {
   if (bytes.length % 4 !== 0)
     return fail("UniversalString length is not a multiple of 4.");
-  let text = "";
+  // Four source bytes become at most four UTF-16 bytes, so the source length
+  // bounds the decoded string before any code point is copied.
+  chargeDecodedName(budget, bytes.length);
+  const decoded = Buffer.allocUnsafe(bytes.length);
+  let at = 0;
   for (let index = 0; index < bytes.length; index += 4) {
     const codePoint = bytes.readUInt32BE(index);
     if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff))
       return fail("UniversalString holds an invalid code point.");
-    text += String.fromCodePoint(codePoint);
+    if (codePoint > 0xffff) {
+      const shifted = codePoint - 0x10000;
+      decoded.writeUInt16LE(0xd800 + (shifted >> 10), at);
+      decoded.writeUInt16LE(0xdc00 + (shifted & 0x3ff), at + 2);
+      at += 4;
+    } else {
+      decoded.writeUInt16LE(codePoint, at);
+      at += 2;
+    }
   }
-  return text;
+  return decoded.subarray(0, at).toString("utf16le");
 };
 
-const decodePrintable = (node: DerNode): string => {
+const decodeDirectoryString = (
+  node: DerNode,
+  budget: DecodedNameBudget,
+): string => {
   switch (node.tag) {
     case 0x1c:
-      return decodeUtf32Be(node.content);
+      return decodeUtf32Be(node.content, budget);
+    case 0x1e:
+      return decodeUtf16Be(node.content, budget);
     case 0x0c:
     case 0x13:
     case 0x16:
     case 0x17:
     case 0x18:
     case 0x1b:
+      chargeDecodedName(budget, node.content.length);
       return node.content.toString("utf8");
-    case 0x1e:
-      return decodeUtf16Be(node.content);
     default:
+      chargeDecodedName(budget, node.content.length);
       return node.content.toString("latin1");
   }
 };
@@ -210,6 +249,7 @@ interface Attribute {
 
 const decodeName = (
   node: DerNode,
+  budget: DecodedNameBudget,
 ): {
   readonly text: string;
   readonly attributes: readonly Attribute[];
@@ -231,7 +271,7 @@ const decodeName = (
       attributes.push({
         oid,
         oid_name: oidName(oid),
-        value: decodePrintable(valueNode),
+        value: decodeDirectoryString(valueNode, budget),
       });
     }
   }
@@ -247,7 +287,7 @@ const decodeName = (
 const validityTime = (node: DerNode): string => {
   if (node.tag !== 0x17 && node.tag !== 0x18)
     return fail("Validity instant is not UTCTime or GeneralizedTime.");
-  return decodePrintable(node);
+  return node.content.toString("utf8");
 };
 
 export interface ParsedCertificate {
@@ -262,7 +302,10 @@ export interface ParsedCertificate {
 }
 
 /** Decode one X.509 Certificate SEQUENCE at a known file-relative DER node. */
-export const parseCertificate = (node: DerNode): ParsedCertificate => {
+export const parseCertificate = (
+  node: DerNode,
+  names: DecodedNameBudget = { remaining: MAX_DECODED_NAME_BYTES },
+): ParsedCertificate => {
   const children = sequence(node, "Certificate");
   const tbs = children[0];
   const signatureAlgorithm = children[1];
@@ -294,8 +337,8 @@ export const parseCertificate = (node: DerNode): ParsedCertificate => {
     start: node.start,
     end: node.end,
     serial_hex: integerHex(serial.content),
-    issuer: decodeName(issuer),
-    subject: decodeName(subject),
+    issuer: decodeName(issuer, names),
+    subject: decodeName(subject, names),
     not_before: validityTime(notBefore),
     not_after: validityTime(notAfter),
     signature_algorithm_oid: algorithmOid(signatureAlgorithm),
@@ -310,7 +353,40 @@ export interface ParsedSigner {
   readonly authenticated_attributes: boolean;
 }
 
-const parseSigner = (node: DerNode): ParsedSigner => {
+const signerIdentifier = (
+  sid: DerNode,
+  names: DecodedNameBudget,
+): {
+  readonly issuer: ReturnType<typeof decodeName> | null;
+  readonly serial_hex: string | null;
+} => {
+  if (sid.tag === 0x30) {
+    const name = sid.children[0];
+    const serial = sid.children[1];
+    if (
+      sid.children.length !== 2 ||
+      name === undefined ||
+      name.tag !== 0x30 ||
+      serial === undefined ||
+      serial.tag !== 0x02
+    )
+      return fail("SignerInfo issuerAndSerialNumber is truncated.");
+    return {
+      issuer: decodeName(name, names),
+      serial_hex: integerHex(serial.content),
+    };
+  }
+  if (sid.tag === 0x80) {
+    if (sid.content.length === 0)
+      return fail("SignerInfo subjectKeyIdentifier is empty.");
+    return { issuer: null, serial_hex: null };
+  }
+  return fail(
+    "SignerInfo sid is not issuerAndSerialNumber or subjectKeyIdentifier.",
+  );
+};
+
+const parseSigner = (node: DerNode, names: DecodedNameBudget): ParsedSigner => {
   const children = sequence(node, "SignerInfo");
   const version = children[0];
   const sid = children[1];
@@ -319,16 +395,7 @@ const parseSigner = (node: DerNode): ParsedSigner => {
     return fail("SignerInfo is missing version.");
   if (sid === undefined || digestAlg === undefined)
     return fail("SignerInfo is missing sid or digestAlgorithm.");
-  let issuer = null;
-  let serial_hex: string | null = null;
-  if (sid.tag === 0x30) {
-    const name = sid.children[0];
-    const serial = sid.children[1];
-    if (name !== undefined && serial !== undefined && serial.tag === 0x02) {
-      issuer = decodeName(name);
-      serial_hex = integerHex(serial.content);
-    }
-  }
+  const { issuer, serial_hex } = signerIdentifier(sid, names);
   let cursor = 3;
   const authenticated = children[cursor]?.tag === 0xa0;
   if (authenticated) cursor += 1;
@@ -338,6 +405,8 @@ const parseSigner = (node: DerNode): ParsedSigner => {
   const signature = children[cursor + 1];
   if (signature === undefined || signature.tag !== 0x04)
     return fail("SignerInfo is missing its signature OCTET STRING.");
+  if (signature.content.length === 0)
+    return fail("SignerInfo signature OCTET STRING is empty.");
   cursor += 2;
   if (children[cursor]?.tag === 0xa1) cursor += 1;
   if (cursor !== children.length)
@@ -358,7 +427,10 @@ export interface ParsedSignedData {
   readonly signers: readonly ParsedSigner[];
 }
 
-const parseSignedData = (node: DerNode): ParsedSignedData => {
+const parseSignedData = (
+  node: DerNode,
+  names: DecodedNameBudget,
+): ParsedSignedData => {
   const children = sequence(node, "SignedData");
   const [version, digestSet, encapContentInfo] = children;
   if (version === undefined || version.tag !== 0x02)
@@ -382,10 +454,16 @@ const parseSignedData = (node: DerNode): ParsedSignedData => {
   const signerSet = children[cursor];
   if (signerSet === undefined || signerSet.tag !== 0x31)
     return fail("SignedData is missing signerInfos.");
+  if (signerSet.children.length === 0)
+    return fail("SignedData signerInfos contains no SignerInfo.");
   if (cursor !== children.length - 1)
     return fail("SignedData has unexpected trailing fields.");
-  const certificates = (certificateSet?.children ?? []).map(parseCertificate);
-  const signers = signerSet.children.map(parseSigner);
+  const certificates = (certificateSet?.children ?? []).map((certificate) =>
+    parseCertificate(certificate, names),
+  );
+  const signers = signerSet.children.map((signer) =>
+    parseSigner(signer, names),
+  );
   return {
     content_type_oid: "1.2.840.113549.1.7.2",
     digest_algorithm_oids,
@@ -408,5 +486,7 @@ export const parsePkcs7SignedData = (bytes: Buffer): ParsedSignedData => {
   const signedData = content?.children[0];
   if (content === undefined || content.tag !== 0xa0 || signedData === undefined)
     return fail("signedData content is missing.");
-  return parseSignedData(signedData);
+  return parseSignedData(signedData, {
+    remaining: MAX_DECODED_NAME_BYTES,
+  });
 };

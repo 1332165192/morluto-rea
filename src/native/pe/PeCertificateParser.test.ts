@@ -9,6 +9,7 @@ import {
 } from "./PeCertificates.fixture.js";
 import {
   DER_NODE_BUDGET,
+  MAX_DECODED_NAME_BYTES,
   MAX_OID_ARC_BYTES,
   MAX_OID_BYTES,
   decodeOid,
@@ -76,6 +77,25 @@ it("fails truncated WIN_CERTIFICATE payloads without partial success", () => {
   const tableOffset = bytes.readUInt32LE(0x80 + 24 + 96 + 32);
   bytes.writeUInt32LE(4, tableOffset);
   expect(() => parse(bytes)).toThrow(ArtifactReaderFailure);
+});
+
+const securityDirectoryAt = 0x98 + 96 + 4 * 8;
+
+it("rejects a short security table instead of reporting it complete", () => {
+  for (const size of [4, 7]) {
+    const bytes = peCertificateFixture();
+    const tableOffset = bytes.readUInt32LE(securityDirectoryAt);
+    bytes.writeUInt32LE(size, securityDirectoryAt + 4);
+    bytes.fill(0, tableOffset, tableOffset + size);
+    expect(() => parse(bytes)).toThrow(/header is truncated/u);
+  }
+  const bytes = peCertificateFixture();
+  const tableOffset = bytes.readUInt32LE(securityDirectoryAt);
+  const tableSize = bytes.readUInt32LE(securityDirectoryAt + 4);
+  const extended = Buffer.concat([bytes, Buffer.alloc(4)]);
+  extended.writeUInt32LE(tableSize + 4, securityDirectoryAt + 4);
+  expect(extended.readUInt32LE(tableOffset)).toBeGreaterThan(0);
+  expect(() => parse(extended)).toThrow(/header is truncated/u);
 });
 
 it("fails PKCS#7 payloads that are not signedData", () => {
@@ -152,6 +172,47 @@ it("fails a SignerInfo without its signature", () => {
   );
 });
 
+it("fails a SignerInfo whose signature bytes were removed", () => {
+  const signer = derSeq(
+    derInt(1),
+    derSeq(derSeq(), derInt(1)),
+    SHA256_ALG,
+    SHA256_ALG,
+    der(0x04, Buffer.alloc(0)),
+  );
+  const payload = contentInfo(
+    derSeq(derInt(1), derSet(SHA256_ALG), derSeq(DATA_OID), derSet(signer)),
+  );
+  expect(() => parse(peCertificateFixture(false, payload))).toThrow(
+    /signature OCTET STRING is empty/u,
+  );
+});
+
+it("fails signedData whose signerInfos set is empty", () => {
+  const payload = contentInfo(
+    derSeq(derInt(1), derSet(SHA256_ALG), derSeq(DATA_OID), derSet()),
+  );
+  expect(() => parse(peCertificateFixture(false, payload))).toThrow(
+    /no SignerInfo/u,
+  );
+});
+
+it("fails a truncated issuerAndSerialNumber instead of dropping the signer", () => {
+  const signer = derSeq(
+    derInt(1),
+    derSeq(derSeq()),
+    SHA256_ALG,
+    SHA256_ALG,
+    der(0x04, Buffer.from([1])),
+  );
+  const payload = contentInfo(
+    derSeq(derInt(1), derSet(SHA256_ALG), derSeq(DATA_OID), derSet(signer)),
+  );
+  expect(() => parse(peCertificateFixture(false, payload))).toThrow(
+    /issuerAndSerialNumber is truncated/u,
+  );
+});
+
 it("stops decoding a certificate payload at the DER node budget", () => {
   const values = Buffer.alloc(2 * (DER_NODE_BUDGET + 1));
   for (let at = 0; at < values.length; at += 2) values[at] = 0x05;
@@ -190,6 +251,66 @@ it("rejects an oversized OBJECT IDENTIFIER before growing an arc", () => {
   );
 });
 
+const cn = Buffer.from([0x06, 0x03, 0x55, 0x04, 0x03]);
+const directoryName = (value: Buffer) => derSeq(derSet(derSeq(cn, value)));
+const namedCertificate = (issuer: Buffer, subject: Buffer) =>
+  derSeq(
+    derSeq(
+      derInt(1),
+      SHA256_ALG,
+      issuer,
+      derSeq(
+        der(0x17, Buffer.from("250101000000Z")),
+        der(0x17, Buffer.from("260101000000Z")),
+      ),
+      subject,
+    ),
+    SHA256_ALG,
+    der(0x03, Buffer.from([0])),
+  );
+
+it("decodes BMPString names once and shares the decoded-byte budget", () => {
+  const bmp = (text: string) => {
+    const content = Buffer.alloc(text.length * 2);
+    [...text].forEach((character, index) =>
+      content.writeUInt16BE(character.charCodeAt(0), index * 2),
+    );
+    return der(0x1e, content);
+  };
+  const certificate = readDer(
+    namedCertificate(directoryName(bmp("REA")), directoryName(bmp("Fixture"))),
+  );
+  expect(parseCertificate(certificate).subject.text).toBe("commonName=Fixture");
+  const half = MAX_DECODED_NAME_BYTES / 2;
+  const within = readDer(
+    namedCertificate(
+      directoryName(der(0x1e, Buffer.alloc(half))),
+      directoryName(der(0x1e, Buffer.alloc(half))),
+    ),
+  );
+  expect(parseCertificate(within).issuer.text.startsWith("commonName=")).toBe(
+    true,
+  );
+  const over = readDer(
+    namedCertificate(
+      directoryName(der(0x1e, Buffer.alloc(half + 2))),
+      directoryName(der(0x1e, Buffer.alloc(half))),
+    ),
+  );
+  expect(() => parseCertificate(over)).toThrow(/decoded budget/u);
+  const universal = Buffer.alloc(MAX_DECODED_NAME_BYTES + 4);
+  expect(() =>
+    parseCertificate(
+      readDer(
+        namedCertificate(
+          directoryName(der(0x1c, universal)),
+          directoryName(bmp("A")),
+        ),
+      ),
+    ),
+  ).toThrow(/decoded budget/u);
+});
+
 it("decodes UniversalString names as UTF-32BE", () => {
   const universal = (text: string) => {
     const content = Buffer.alloc(text.length * 4);
@@ -214,6 +335,13 @@ it("decodes UniversalString names as UTF-32BE", () => {
     derSeq(tbs, SHA256_ALG, der(0x03, Buffer.from([0]))),
   );
   expect(parseCertificate(certificate).subject.text).toBe("commonName=REA");
+  const emoji = readDer(
+    namedCertificate(
+      directoryName(der(0x1c, Buffer.from([0x00, 0x01, 0xf6, 0x00]))),
+      directoryName(der(0x1c, Buffer.from([0x00, 0x01, 0xf6, 0x00]))),
+    ),
+  );
+  expect(parseCertificate(emoji).subject.text).toBe("commonName=😀");
   const odd = derSeq(derSet(derSeq(cn, der(0x1c, Buffer.from([0, 0, 0])))));
   const broken = readDer(
     derSeq(

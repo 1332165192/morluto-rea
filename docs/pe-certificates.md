@@ -39,7 +39,11 @@ image is unsigned in every catalog or overlay sense.
 The selected file is limited to 64 MiB by default (512 MiB maximum). At most
 eight `WIN_CERTIFICATE` entries are examined by default. Malformed PE headers,
 truncated certificate entries, and PKCS#7 that is not structurally signedData
-fail without partial success.
+fail without partial success. A security directory that ends in fewer than
+eight header bytes, including zeros, is a truncated `WIN_CERTIFICATE` and
+fails the same way. SignedData must contain at least one `SignerInfo`, and
+each `SignerInfo` must carry a non-empty signature value. Decoded certificate
+name text shares a 64 KiB budget per PKCS#7 payload.
 
 This workflow does not verify signatures, certificate chains, timestamps, or
 Authenticode digest coverage of image bytes.

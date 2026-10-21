@@ -52,6 +52,7 @@ export const registerBinaryDiagnosticsCommands = (
               pe,
               "rea-pe-certificates",
               "inspect_pe_certificates",
+              signal,
             ),
         );
       }),

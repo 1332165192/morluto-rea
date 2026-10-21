@@ -89,11 +89,10 @@ export const parsePeCertificates = (
   let at = 0;
   let examined = 0;
   while (at < table.length) {
-    if (table.length - at < 8) {
-      if (table.subarray(at).some((byte) => byte !== 0))
-        fail("WIN_CERTIFICATE header is truncated.");
-      break;
-    }
+    // Alignment padding sits inside the gap before the next 8-byte boundary.
+    // Bytes that remain after that boundary are a short header, including
+    // zeros at the start of the table.
+    if (table.length - at < 8) fail("WIN_CERTIFICATE header is truncated.");
     examined += 1;
     if (examined > input.max_entries)
       throw new ArtifactReaderFailure(
