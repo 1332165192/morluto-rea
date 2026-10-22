@@ -708,9 +708,15 @@ artifacts, dependency installs, package archives, and runtime verification remai
 host-local. Keep platform-dependent outputs out of this shared cache.
 
 The Windows native verifier's private-runtime ACL observer reads SID rules once
-for both trustee validation and counting. It deliberately rejects the convenience
-`Access` property, which resolves account names. Its `private-runtime-acl` stderr
-markers report completed phases and elapsed time; inspect these on a timeout
+for both trustee validation and counting, using .NET APIs and a fixed JSON
+projection of booleans and a count. Module autoloading is disabled; the observer
+does not need PowerShell utility cmdlets or account-name resolution. A separate
+PowerShell regression checks the shared projection with utility cmdlets unloaded
+and an `Access` property that records and rejects account-name lookup. It covers
+foreign trustees, different owners, an unprotected DACL, and empty/single rules;
+these substitutes do not establish real Windows ACL behavior. The observer's
+`private-runtime-acl` stderr markers report completed phases and elapsed time;
+inspect these on a timeout
 before attributing it to startup, ACL reads, or identity lookup. The original
 15-second deadline and all ownership, DACL, and readonly assertions remain in
 force. A passing retry alone does not explain a previous timeout.
