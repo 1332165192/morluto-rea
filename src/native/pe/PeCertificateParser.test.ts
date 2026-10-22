@@ -9,7 +9,7 @@ import {
 } from "./PeCertificates.fixture.js";
 import {
   DER_NODE_BUDGET,
-  MAX_DECODED_NAME_BYTES,
+  MAX_DECODED_TEXT_BYTES,
   MAX_OID_ARC_BYTES,
   MAX_OID_BYTES,
   decodeOid,
@@ -281,7 +281,9 @@ it("decodes BMPString names once and shares the decoded-byte budget", () => {
     namedCertificate(directoryName(bmp("REA")), directoryName(bmp("Fixture"))),
   );
   expect(parseCertificate(certificate).subject.text).toBe("commonName=Fixture");
-  const half = MAX_DECODED_NAME_BYTES / 2;
+  // The fixture serial ("01") and two UTCTime values share this ceiling.
+  const reserved = 2 + "250101000000Z".length + "260101000000Z".length;
+  const half = (MAX_DECODED_TEXT_BYTES - reserved) / 2;
   const within = readDer(
     namedCertificate(
       directoryName(der(0x1e, Buffer.alloc(half))),
@@ -298,13 +300,55 @@ it("decodes BMPString names once and shares the decoded-byte budget", () => {
     ),
   );
   expect(() => parseCertificate(over)).toThrow(/decoded budget/u);
-  const universal = Buffer.alloc(MAX_DECODED_NAME_BYTES + 4);
+  const universal = Buffer.alloc(MAX_DECODED_TEXT_BYTES + 4);
   expect(() =>
     parseCertificate(
       readDer(
         namedCertificate(
           directoryName(der(0x1c, universal)),
           directoryName(bmp("A")),
+        ),
+      ),
+    ),
+  ).toThrow(/decoded budget/u);
+});
+
+it("charges serial hex and validity text before converting them", () => {
+  const name = directoryName(der(0x13, Buffer.from("REA")));
+  const utc = (value: string) => der(0x17, Buffer.from(value));
+  const certificate = (serial: Buffer, validity: Buffer) =>
+    readDer(
+      derSeq(
+        derSeq(serial, SHA256_ALG, name, validity, name),
+        SHA256_ALG,
+        der(0x03, Buffer.from([0])),
+      ),
+    );
+  const padded = Buffer.alloc(MAX_DECODED_TEXT_BYTES, 0);
+  padded[padded.length - 1] = 0x2a;
+  expect(
+    parseCertificate(
+      certificate(
+        der(0x02, padded),
+        derSeq(utc("250101000000Z"), utc("260101000000Z")),
+      ),
+    ).serial_hex,
+  ).toBe("2a");
+  expect(() =>
+    parseCertificate(
+      certificate(
+        der(0x02, Buffer.alloc(MAX_DECODED_TEXT_BYTES / 2 + 1, 0xff)),
+        derSeq(utc("250101000000Z"), utc("260101000000Z")),
+      ),
+    ),
+  ).toThrow(/decoded budget/u);
+  expect(() =>
+    parseCertificate(
+      certificate(
+        derInt(1),
+        derSeq(
+          der(0x18, Buffer.alloc(MAX_DECODED_TEXT_BYTES + 1)),
+          utc("260101000000Z"),
         ),
       ),
     ),
