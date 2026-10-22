@@ -762,6 +762,14 @@ it.each([
     { code: true, package: true, runtime: true, apple: false },
   ],
   [
+    "scripts/lib/windows-private-runtime-acl.ps1",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
+    "tests/boundary/process/windowsPrivateRuntimeAclObserver.test.ts",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
     "tests/boundary/filesystem/clientConfigurationEnvironment.test.ts",
     { code: true, package: true, runtime: true, apple: false },
   ],
