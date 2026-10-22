@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { access, lstat, realpath } from "node:fs/promises";
 import { setImmediate } from "node:timers/promises";
 
@@ -91,8 +91,8 @@ export const reconstructJavaScriptArtifact = async (
     };
     const input = javascriptArtifactReconstructionInputSchema.parse(rawInput);
     abortIfNeeded(signal);
-    const path = await resolveSelectedInput(input.input_path);
-    const format = await resolveFormat(path, input);
+    const { path, metadata } = await resolveSelectedInput(input.input_path);
+    const format = selectedFormat(path, metadata, input);
     const snapshot = await scanCanonicalArtifactInventoryInScope(path, {
       resourceScope: scope,
       signal,
@@ -346,13 +346,21 @@ const OPERATION = "analyze_javascript_application";
 /**
  * Resolve the caller-selected input. A missing, looping, overlong, or
  * unreadable selection is a caller or host-resolution failure, not a damaged
- * artifact.
+ * artifact. A selected directory must also be searchable: without search
+ * permission its entries can be listed but not inspected, so no entry is
+ * readable. Other host failures propagate with their errno facts intact.
  */
-const resolveSelectedInput = async (inputPath: string): Promise<string> => {
+const resolveSelectedInput = async (
+  inputPath: string,
+): Promise<{ readonly path: string; readonly metadata: Stats }> => {
   try {
     const path = await realpath(inputPath);
-    await access(path, constants.R_OK);
-    return path;
+    const metadata = await lstat(path);
+    await access(
+      path,
+      metadata.isDirectory() ? constants.R_OK | constants.X_OK : constants.R_OK,
+    );
+    return { path, metadata };
   } catch (cause: unknown) {
     const code =
       cause instanceof Error && "code" in cause ? String(cause.code) : "";
@@ -389,11 +397,11 @@ const selectedInputResolutionMessage = (
     : `Selected input path could not be resolved because symbolic-link traversal looped or exceeded the host limit (ELOOP): ${inputPath}`;
 
 /** The selected input's kind, checked against the caller's requested format. */
-const resolveFormat = async (
+const selectedFormat = (
   path: string,
+  metadata: Stats,
   input: JavaScriptArtifactReconstructionInput,
-): Promise<"asar" | "directory"> => {
-  const metadata = await lstat(path);
+): "asar" | "directory" => {
   const observed = metadata.isDirectory()
     ? "directory"
     : metadata.isFile() && path.toLowerCase().endsWith(".asar")

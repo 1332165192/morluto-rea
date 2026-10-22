@@ -7,7 +7,10 @@ import {
   type JavaScriptApplicationAnalysisResult,
   parseOwnedJavaScriptApplicationAnalysisSteps,
 } from "../../domain/javascript/javascriptApplicationAnalysis.js";
-import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import {
+  AnalysisOutputError,
+  AnalysisResourceConstraintError,
+} from "../../domain/analysisErrorCore.js";
 import { ArtifactOperationError } from "../../domain/artifactOperationError.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import type { Evidence } from "../../domain/evidence.js";
@@ -149,13 +152,8 @@ export const analyzeJavaScriptApplicationValidated = async (
           cause,
         }),
       );
-    if (
-      cause instanceof Error &&
-      "code" in cause &&
-      typeof cause.code === "string" &&
-      FILESYSTEM_ERROR_CODES.has(cause.code)
-    )
-      return err(new ArtifactOperationError(OPERATION, "io"));
+    const filesystemFailure = hostFilesystemFailure(cause);
+    if (filesystemFailure !== undefined) return err(filesystemFailure);
     return err(
       new ProviderAdapterError(JAVASCRIPT_APPLICATION_PROVIDER.id, OPERATION, {
         cause,
@@ -207,6 +205,43 @@ const describeResultSchemaFailure = (cause: z.ZodError): string => {
 
 const escapePointerPart = (part: string): string =>
   part.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/**
+ * Project a host filesystem failure that no narrower owner classified. Selected
+ * input denial is classified at selection; this failure may concern any path,
+ * including private workspace files, so it keeps the host's own facts rather
+ * than claiming a selected-read denial.
+ */
+const hostFilesystemFailure = (cause: unknown): AnalysisError | undefined => {
+  if (!(cause instanceof Error)) return undefined;
+  const code: unknown = Reflect.get(cause, "code");
+  if (typeof code !== "string" || !FILESYSTEM_ERROR_CODES.has(code))
+    return undefined;
+  const syscall: unknown = Reflect.get(cause, "syscall");
+  const path: unknown = Reflect.get(cause, "path");
+  const facts = {
+    system_code: code,
+    ...(typeof syscall === "string" ? { syscall } : {}),
+    ...(typeof path === "string" ? { path } : {}),
+  };
+  if (code === "EMFILE" || code === "ENFILE")
+    return new AnalysisResourceConstraintError(
+      OPERATION,
+      "capacity",
+      `Host file-descriptor limit reached (${code})${typeof path === "string" ? ` while accessing ${path}` : ""}`,
+      facts,
+      {
+        cause,
+        retryable: true,
+        remediationAction:
+          "Close unused files or raise the open-file limit for the process or host running REA, then retry.",
+      },
+    );
+  return new ArtifactOperationError(OPERATION, "io", undefined, cause.message, {
+    cause,
+    diagnostics: facts,
+  });
+};
 
 const FILESYSTEM_ERROR_CODES = new Set([
   "ENOENT",

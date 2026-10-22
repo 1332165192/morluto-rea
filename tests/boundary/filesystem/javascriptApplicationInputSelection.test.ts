@@ -1,7 +1,9 @@
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
+import { promises as filesystem } from "node:fs";
+import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
@@ -167,4 +169,142 @@ describe("JavaScript application input selection", () => {
       });
     },
   );
+});
+
+describe("JavaScript application selected directory search permission", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a readable but unsearchable selected directory as a host access denial",
+    async () => {
+      const { directory } = await application();
+      await chmod(directory, 0o400);
+      try {
+        expect(await analyzeFailure({ input_path: directory })).toMatchObject({
+          code: "access_denied",
+          category: "unavailable",
+          details: {
+            path: directory,
+            system_code: "EACCES",
+            boundary: "filesystem-read",
+          },
+        });
+      } finally {
+        await chmod(directory, 0o700);
+      }
+      expect(
+        (await analyzeJavaScriptApplication({ input_path: directory })).ok,
+      ).toBe(true);
+    },
+  );
+});
+
+describe("JavaScript application host filesystem failures", () => {
+  const inject = async (
+    method: "access" | "lstat" | "realpath",
+    selected: string,
+    failure: Error,
+  ) => {
+    const original = filesystem[method] as (
+      ...args: unknown[]
+    ) => Promise<unknown>;
+    let injected = 0;
+    const spy = vi.spyOn(filesystem, method).mockImplementation((async (
+      ...args: unknown[]
+    ) => {
+      if (String(args[0]) === selected) {
+        injected += 1;
+        throw failure;
+      }
+      return original(...args);
+    }) as never);
+    syncBuiltinESMExports();
+    try {
+      const error = await analyzeFailure({ input_path: selected });
+      expect(injected).toBe(1);
+      return error;
+    } finally {
+      spy.mockRestore();
+      syncBuiltinESMExports();
+    }
+  };
+
+  const hostFailure = (code: string, syscall: string, path: string) =>
+    Object.assign(new Error(`${code}: host failure, ${syscall} '${path}'`), {
+      code,
+      syscall,
+      path,
+    });
+
+  it("keeps the errno, syscall and path of a host I/O failure", async () => {
+    const { directory } = await application();
+    const selected = await realpath(directory);
+    const failure = hostFailure("EIO", "realpath", selected);
+
+    expect(await inject("realpath", selected, failure)).toMatchObject({
+      code: "artifact_operation_failed",
+      category: "execution_failure",
+      details: {
+        operation: "analyze_javascript_application",
+        reason: "io",
+        detail: failure.message,
+        diagnostics: {
+          system_code: "EIO",
+          syscall: "realpath",
+          path: selected,
+        },
+      },
+    });
+  });
+
+  it("reports descriptor exhaustion as a retryable resource constraint", async () => {
+    const { directory } = await application();
+    const selected = await realpath(directory);
+
+    expect(
+      await inject(
+        "access",
+        selected,
+        hostFailure("EMFILE", "access", selected),
+      ),
+    ).toMatchObject({
+      code: "resource_constraint",
+      category: "resource_constraint",
+      retryable: true,
+      details: {
+        operation: "analyze_javascript_application",
+        resource: "capacity",
+        reported_limits: {
+          system_code: "EMFILE",
+          syscall: "access",
+          path: selected,
+        },
+      },
+    });
+  });
+
+  it("classifies a denied selected metadata read as a host access denial", async () => {
+    const { directory } = await application();
+    const selected = await realpath(directory);
+
+    expect(
+      await inject("lstat", selected, hostFailure("EACCES", "lstat", selected)),
+    ).toMatchObject({
+      code: "access_denied",
+      details: { path: selected, system_code: "EACCES" },
+    });
+  });
+
+  it("keeps a non-errno failure an execution failure", async () => {
+    const { directory } = await application();
+    const selected = await realpath(directory);
+
+    expect(
+      await inject("lstat", selected, new Error("unexpected internal failure")),
+    ).toMatchObject({
+      code: "execution_failure",
+      category: "execution_failure",
+      details: {
+        diagnostics: { error_message: "unexpected internal failure" },
+      },
+    });
+  });
 });
