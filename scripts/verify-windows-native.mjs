@@ -48,6 +48,10 @@ const { PrivateRuntimeRootUnavailableError } = await import(
     join(packageRoot, "dist/process/PrivateRuntimeRootUnavailableError.js"),
   )
 );
+const privateRuntimeAclObserver = await readFile(
+  new URL("./lib/windows-private-runtime-acl.ps1", import.meta.url),
+  "utf8",
+);
 const workspace = await mkdtemp(join(tmpdir(), "rea-native-conformance-"));
 // A pwsh caller can supply module paths incompatible with Windows PowerShell.
 // Each independent observer must discover its own module path.
@@ -55,10 +59,6 @@ const windowsPowerShellEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(
     ([name]) => name.toLowerCase() !== "psmodulepath",
   ),
-);
-const privateRuntimeAclObserver = await readFile(
-  new URL("./lib/windows-private-runtime-acl.ps1", import.meta.url),
-  "utf8",
 );
 const environment = Object.entries(process.env)
   .filter(([, value]) => value !== undefined)
