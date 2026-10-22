@@ -155,6 +155,16 @@ dependency edges, and the section's file range. A missing `.dep-v0` section is
 null metadata, not proof that the binary has no dependencies. See
 [Rust binaries](rust-binaries.md).
 
+Inspect ELF PT_NOTE and SHT_NOTE tables without executing the image:
+
+```bash
+rea inspect-elf-notes /absolute/path/to/program --json
+```
+
+The workflow reports note owners, types, descriptor hashes, and GNU build-id
+or ABI-tag fields when those descriptors match. A missing note table is
+observed absence of those declarations. See [ELF note tables](elf-notes.md).
+
 Configure [Hopper or Ghidra](installation.md#hopper), the
 [IDA adapter](ida-provider.md), or [Kuna](kuna-provider.md) before analyzing a
 native target. Substitute
@@ -414,7 +424,8 @@ evidence file's `evidence_id`; otherwise the command refuses with
 `invalid_request` before binding. Before binding it derives the
 `environment-state` view of the capture with the manifest's `template_rules`,
 as `inspect-analysis-view` would, and serves from it: read tools whose views
-are state-backed answer from a live state, write tools are not served, and
+are state-backed answer from a live state, write tools are served only where
+the capture's later reads confirmed their effect, and
 `/agentenv` serves `data/reset`, `data/add` and `data/get`. When the state
 cannot be derived, or its catalog exceeds the discovery reservation, it logs a
 warning with the error code and message and serves replay; `--replay-only` serves replay without deriving. In replay every

@@ -96,6 +96,17 @@ dependencies. An omitted package kind stays null. A rustc commit hash is
 inferred from a read-only `/rustc/<40-hex>/` path and does not by itself
 identify the compiler. See [Rust binaries](https://github.com/morluto/rea/blob/main/docs/rust-binaries.md).
 
+## ELF note tables
+
+Use `inspect_elf_notes` for an explicit local ELF32/ELF64 image when the
+question concerns PT_NOTE/SHT_NOTE owners, GNU build-id, or GNU ABI-tag
+fields. No `open_binary` or target execution is required. The CLI equivalent
+is `inspect-elf-notes PATH`. Preserve artifact SHA-256, table file ranges,
+descriptor hashes, and original owner spellings. A missing table is observed
+absence of those declarations, not proof the image never carried notes in
+another container. See
+[ELF note tables](https://github.com/morluto/rea/blob/main/docs/elf-notes.md).
+
 ## SQLite snapshots
 
 Use `inspect_sqlite_database` with an explicit local database snapshot for its
@@ -367,6 +378,8 @@ For headerless DOS COM, explicitly open with `format: "dos-com"` (CLI
 `--target-format dos-com`). Inspect the load image before trusting function
 analysis: the entry is `0x10100`, file offset zero, with imposed real-mode segment
 context. PSP/stack/device state remains unmodeled. See [DOS guide](https://github.com/morluto/rea/blob/main/docs/ghidra-dos.md).
+
+Use `inspect_byte_entropy` to triage high- and low-entropy ranges before extraction.
 
 For other headerless images (embedded firmware without ELF/Mach-O/PE/MZ
 headers), open with `format: "raw-binary"`, `architecture` (`x86`, `x86_64`,

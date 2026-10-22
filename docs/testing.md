@@ -1250,7 +1250,9 @@ host behavior or native process-supervision controls.
 real `.nib` with Xcode `ibtool`, wraps it in a temporary app bundle, and runs
 the compiled CLI and stdio MCP server with production providers. It compares
 their decoded results and checks the view hierarchy, outlet, action, evidence coverage, and truncation
-status. Storyboard compilation additionally requires an installed iOS platform.
+status. It also recompiles the XIB with toggled control booleans and requires
+both decodes to match `ibtool --export` for each source. Storyboard compilation
+additionally requires an installed iOS platform.
 
 Keep the provider-specific acceptance path independent from optional
 cross-compilers. Cross-format failures belong to the cross-format lane and must
@@ -1825,7 +1827,7 @@ the built CLI, packs the checkout with `npm pack`, exports the bundle with
 registry package, and runs `agent-env run` on the bundle. It checks that the
 export reports the planned file set with the inputs copied byte-exact and a
 bundle served from the derived state, which serves fewer tools than the
-manifest because write tools are not served, that the runner exits `0` with
+manifest because write tools the capture did not confirm are not served, that the runner exits `0` with
 `tasks/smoke.json` reported as passed and the verifier's description naming
 that served tool count, and that no container exists
 after the run that did not exist before; the container inventory runs even when

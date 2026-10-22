@@ -12,8 +12,13 @@ import { wasmArtifactModule } from "../composition/wasm.js";
 import { registerWasmTools } from "./registerWasmTools.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { captureProviderEnvironment } from "./providerEnvironment.js";
-import { createPeResourcesService } from "../composition/binaryDiagnostics.js";
+import {
+  createElfNotesService,
+  createPeResourcesService,
+} from "../composition/binaryDiagnostics.js";
+import type { ElfNotesService } from "../application/binaryDiagnostics/ElfNotesService.js";
 import type { PeResourcesService } from "../application/binaryDiagnostics/PeResourcesService.js";
+import { registerElfNotesTool } from "./registerElfNotesTool.js";
 import { registerPeResourcesTool } from "./registerPeResourcesTool.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
 import {
@@ -46,7 +51,10 @@ import { registerAnalysisViewTool } from "./registerAnalysisViewTool.js";
 import { registerBinaryDiagnosticsTools } from "./registerBinaryDiagnosticsTools.js";
 import { FridaInstrumentationManager } from "../frida/FridaInstrumentationManager.js";
 import { registerFridaTools } from "./registerFridaTools.js";
-import { createBinaryLayoutService } from "../composition/binaryDiagnostics.js";
+import {
+  createByteEntropyService,
+  createBinaryLayoutService,
+} from "../composition/binaryDiagnostics.js";
 import type { BinaryLayoutService } from "../application/binaryDiagnostics/BinaryLayoutService.js";
 import { createCatalogIdentity } from "../catalogIdentity.js";
 import { EvidenceMcpServer } from "./EvidenceMcpServer.js";
@@ -347,6 +355,7 @@ export const createServer = (
   const il2cppMetadata =
     options.il2cppMetadata ?? createIl2cppMetadataService();
   const peResources = createPeResourcesService();
+  const elfNotes = createElfNotesService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const webNetworkCapture =
     options.webNetworkCapture ?? createWebNetworkCaptureService(environment);
@@ -448,6 +457,7 @@ export const createServer = (
       modelArtifact.close(),
       gpuCodeObjects.close(),
       peResources.close(),
+      elfNotes.close(),
       electronFuses.close(),
       webNetworkCapture.close(),
       javascriptRecovery.close?.() ?? Promise.resolve(),
@@ -511,6 +521,7 @@ export const createServer = (
     rustBinary,
     il2cppMetadata,
     peResources,
+    elfNotes,
     electronFuses,
     webNetworkCapture,
   };
@@ -742,6 +753,7 @@ const registerConfiguredAnalysisTools = (
     rustBinary,
     il2cppMetadata,
     peResources,
+    elfNotes,
     webNetworkCapture,
     artifactResources,
   }: ServerToolContext,
@@ -770,6 +782,7 @@ const registerConfiguredAnalysisTools = (
   registerBinaryDiagnosticsTools(
     server,
     options.binaryLayout ?? createBinaryLayoutService(environment),
+    createByteEntropyService(artifactResources),
     toolLogger,
     recordEvidence,
     evidenceById,
@@ -786,6 +799,13 @@ const registerConfiguredAnalysisTools = (
   registerPeResourcesTool(
     server,
     peResources,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerElfNotesTool(
+    server,
+    elfNotes,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -923,6 +943,7 @@ interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly rustBinary: RustBinaryService;
   readonly il2cppMetadata: Il2cppMetadataService;
   readonly peResources: PeResourcesService;
+  readonly elfNotes: ElfNotesService;
   readonly electronFuses: ElectronFuseService;
   readonly webNetworkCapture: WebNetworkCaptureService;
   readonly artifactResources: ArtifactResourceScope;
