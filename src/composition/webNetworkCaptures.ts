@@ -10,9 +10,9 @@ export const createWebNetworkCaptureService = (
   new WebNetworkCaptureService(
     new HistoricalCaptureDecoder(
       [
-        new NodeCaptureAdapter("har"),
-        new NodeCaptureAdapter("saz"),
-        new NodeCaptureAdapter("qlog"),
+        new NodeCaptureAdapter("har", environment),
+        new NodeCaptureAdapter("saz", environment),
+        new NodeCaptureAdapter("qlog", environment),
         new MitmproxyCaptureAdapter(environment),
       ],
       environment,

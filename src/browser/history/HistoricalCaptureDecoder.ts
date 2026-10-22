@@ -10,9 +10,13 @@ import {
   withCaptureReaderCleanup,
 } from "./CaptureFailures.js";
 import {
+  captureDecoderHeapRecovery,
+  resolveCaptureDecoderHeap,
+  type CaptureDecoderHeap,
+} from "../../config/captureDecoderHeap.js";
+import {
   NODE_CAPTURE_HEAP_ENFORCED,
-  NODE_CAPTURE_HEAP_LIMITS,
-  NODE_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES,
+  captureDecoderProcessMemoryLimitBytes,
 } from "./CaptureRelease.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import type { HistoricalCaptureFormatAdapter } from "./HistoricalCaptureFormatAdapter.js";
@@ -76,6 +80,7 @@ const replySchema = z.discriminatedUnion("ok", [
 /** One owned snapshot/process/root lifecycle for replaceable historical format decoders. */
 export class HistoricalCaptureDecoder {
   readonly #resources: ArtifactResourceScope;
+  readonly #heap: CaptureDecoderHeap;
 
   constructor(
     readonly adapters: readonly HistoricalCaptureFormatAdapter[],
@@ -86,6 +91,7 @@ export class HistoricalCaptureDecoder {
     resources = new ArtifactResourceScope(),
   ) {
     this.#resources = resources;
+    this.#heap = resolveCaptureDecoderHeap(environment);
   }
 
   /** Retry retained readers and private roots at service shutdown. */
@@ -108,6 +114,7 @@ export class HistoricalCaptureDecoder {
         cause,
         "capture-read",
         options,
+        this.#heap,
       );
       return err(
         redactExplicitFailure(
@@ -186,7 +193,12 @@ export class HistoricalCaptureDecoder {
       // A decoder that survived a failed allocation may still reply; its
       // reply is not trusted as complete once the limit was reached.
       if (completed.memoryLimitReached === true)
-        throw captureMemoryFailure(input, CAPTURE_PROCESS_MEMORY_LIMIT_REASON);
+        throw captureMemoryFailure(
+          input,
+          CAPTURE_PROCESS_MEMORY_LIMIT_REASON,
+          undefined,
+          this.#heap,
+        );
       let reply: z.output<typeof replySchema>;
       try {
         const replyFile = await readStableArtifact(
@@ -248,7 +260,12 @@ export class HistoricalCaptureDecoder {
             },
           ]);
         if (reply.reason === "resource-limit")
-          throw captureMemoryFailure(input, reply.message);
+          throw captureMemoryFailure(
+            input,
+            reply.message,
+            undefined,
+            this.#heap,
+          );
         if (reply.reason === "decoder")
           throw new ProviderAdapterError(input.format, OPERATION, {
             diagnostics: {
@@ -288,7 +305,7 @@ export class HistoricalCaptureDecoder {
           "This is retained producer evidence, without live browser transaction IDs, scenario provenance, execution attribution or deployment authenticity. Recorded URLs are never fetched.",
           "Every record is decoded before selection; no partial success is returned on malformed input or a resource limit.",
           "Known authentication headers/cookies and explicitly marked literal values are excluded. Unknown extension names do not establish sensitivity.",
-          `Complete evidence is bounded by a ${String(WEB_NETWORK_CAPTURE_LIMITS.inputBytes)}-byte input budget, a ${String(WEB_NETWORK_CAPTURE_LIMITS.outputBytes)}-byte reply budget, and a ${String(WEB_NETWORK_CAPTURE_LIMITS.depth)}-level nesting cap. Those have no runtime override. capture_timeout_ms is ${String(selectedWebNetworkCaptureTimeoutMs(input.capture_timeout_ms))} ms (omitted means ${String(WEB_NETWORK_CAPTURE_LIMITS.timeoutMs)}). ${nodeMemoryLimitation()}; mitmproxy decoding uses a 768 MiB Linux address-space limit.`,
+          `Complete evidence is bounded by a ${String(WEB_NETWORK_CAPTURE_LIMITS.inputBytes)}-byte input budget, a ${String(WEB_NETWORK_CAPTURE_LIMITS.outputBytes)}-byte reply budget, and a ${String(WEB_NETWORK_CAPTURE_LIMITS.depth)}-level nesting cap. Those have no runtime override. capture_timeout_ms is ${String(selectedWebNetworkCaptureTimeoutMs(input.capture_timeout_ms))} ms (omitted means ${String(WEB_NETWORK_CAPTURE_LIMITS.timeoutMs)}). ${nodeMemoryLimitation(this.#heap)} Mitmproxy decoding uses a 768 MiB Linux address-space limit.`,
         ],
       };
       if (input.format === "qlog") {
@@ -348,13 +365,25 @@ export class HistoricalCaptureDecoder {
                       message: cause.message,
                     },
                   ])
-                : historicalCaptureFailure(input, cause, phase, options);
+                : historicalCaptureFailure(
+                    input,
+                    cause,
+                    phase,
+                    options,
+                    this.#heap,
+                  );
           if (safePartialSource) error.retainPartialObservation(result.value);
           throw error;
         }
       }
     } catch (cause: unknown) {
-      const error = historicalCaptureFailure(input, cause, phase, options);
+      const error = historicalCaptureFailure(
+        input,
+        cause,
+        phase,
+        options,
+        this.#heap,
+      );
       result = err(
         redactExplicitFailure(
           withCaptureReaderCleanup(error, cause),
@@ -419,12 +448,16 @@ export class HistoricalCaptureDecoder {
 }
 
 /** The Node capture decoder runs on this executable; only Node.js enforces its V8 heap flags. */
-const nodeMemoryLimitation = (): string => {
+const nodeMemoryLimitation = (heap: CaptureDecoderHeap): string => {
+  const recovery = captureDecoderHeapRecovery(heap);
   if (NODE_CAPTURE_HEAP_ENFORCED)
-    return `HAR/SAZ/qlog use a ${String(NODE_CAPTURE_HEAP_LIMITS.oldGenerationMiB)} MiB Node old-generation heap`;
-  return NODE_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES === null
-    ? "HAR/SAZ/qlog run on Bun, which does not enforce REA's V8 heap flags"
-    : `HAR/SAZ/qlog run on Bun, which does not enforce REA's V8 heap flags, under a ${String(NODE_CAPTURE_PROCESS_MEMORY_LIMIT_BYTES)}-byte Windows Job Object commit limit`;
+    return `HAR/SAZ/qlog use a ${String(heap.oldGenerationMiB)} MiB Node old-generation heap (source ${heap.source}). ${recovery}`;
+  const commitLimit = captureDecoderProcessMemoryLimitBytes(
+    heap.oldGenerationMiB,
+  );
+  return commitLimit === null
+    ? `HAR/SAZ/qlog run on Bun, which does not enforce REA's V8 heap flags. ${recovery}`
+    : `HAR/SAZ/qlog run on Bun, which does not enforce REA's V8 heap flags, under a ${String(commitLimit)}-byte Windows Job Object commit limit. ${recovery}`;
 };
 
 const replyFailureReason = (cause: unknown): string => {
