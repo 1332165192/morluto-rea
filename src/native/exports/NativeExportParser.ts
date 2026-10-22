@@ -4,7 +4,7 @@ import {
   BinaryResourceFailure,
   mappedFileOffset,
 } from "../metadata/BinaryContainer.js";
-import { readElfImage } from "../metadata/ElfImage.js";
+import { architectureForElfMachine } from "../metadata/ElfImage.js";
 import { readElfString, readElfSymbol } from "../metadata/ElfSymbol.js";
 import {
   readNativeDirectoryFromBuffer,
@@ -28,6 +28,25 @@ const SHT_GNU_VERSYM = 0x6fffffff;
 const PE_EXPORT_DIRECTORY = 0;
 const PE_EXPORT_DIRECTORY_BYTES = 40;
 const MAXIMUM_NAME_BYTES = 4096;
+/** Text retained across all rows; names can repeat one long string table entry. */
+const MAXIMUM_RETAINED_TEXT_BYTES = 16 * 1024 * 1024;
+
+/** Charge every retained row and its text before it is stored. */
+const createRetention = () => {
+  let rows = 0;
+  let text = 0;
+  return (...strings: readonly (string | null)[]): void => {
+    rows++;
+    rowBudget(rows, "Export inventory");
+    for (const value of strings) text += value?.length ?? 0;
+    if (text > MAXIMUM_RETAINED_TEXT_BYTES)
+      throw new BinaryResourceFailure(
+        "structure",
+        MAXIMUM_RETAINED_TEXT_BYTES,
+        `Export names exceed the ${String(MAXIMUM_RETAINED_TEXT_BYTES)}-byte retained-text allowance`,
+      );
+  };
+};
 
 const hex = (value: bigint | number) => `0x${value.toString(16)}`;
 
@@ -88,13 +107,12 @@ const parsePeExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
       ],
     };
   const reader = new BinaryReader(bytes, true);
+  const mappings =
+    image.pe_header_mapping === undefined
+      ? image.mappings
+      : [image.pe_header_mapping, ...image.mappings];
   const map = (rva: number, size: number): number =>
-    mappedFileOffset(
-      image.mappings,
-      base + BigInt(rva),
-      size,
-      image.zero_fills,
-    );
+    mappedFileOffset(mappings, base + BigInt(rva), size, image.zero_fills);
   const cString = (rva: number): string => {
     const start = map(rva, 1);
     const end = bytes
@@ -167,6 +185,7 @@ const parsePeExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
   }
 
   const forwarderEnd = directory.virtual_address + directory.size;
+  const retain = createRetention();
   const exports: PeExport[] = [];
   for (let index = 0; index < functionCount; index++) {
     const rva = reader.u32(functions + index * 4);
@@ -188,11 +207,15 @@ const parsePeExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
     } else target = { address: hex(base + BigInt(rva)), forwarder: null };
     const exportNames = namesByFunction.get(index);
     if (exportNames !== undefined)
-      for (const name of exportNames)
+      for (const name of exportNames) {
+        retain(name, target.forwarder);
         exports.push({ name, ordinal, ...target });
+      }
     // A slot whose only name was unreadable is reported through its issue.
-    else if (!namedFunctions.has(index))
+    else if (!namedFunctions.has(index)) {
+      retain(target.forwarder);
       exports.push({ name: null, ordinal, ...target });
+    }
   }
   return {
     ...result,
@@ -293,15 +316,14 @@ const readVersionDefinitions = (
 
 /** Read defined exported entries of `.dynsym` with their symbol versions. */
 const parseElfExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
-  const image = readElfImage(bytes);
   const directory = readNativeDirectoryFromBuffer(bytes, "elf");
   const reader = new BinaryReader(bytes, directory.little);
   const result = {
     artifact,
     format: "elf" as const,
-    architecture: image.architecture,
-    bits: image.bits,
-    byte_order: image.byte_order,
+    architecture: architectureForElfMachine(directory.machine),
+    bits: directory.bits,
+    byte_order: directory.little ? ("little" as const) : ("big" as const),
   };
   const { sections } = directory;
   if (sections.length === 0)
@@ -335,11 +357,13 @@ const parseElfExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
   if (
     dynsym.entry_size !== BigInt(width) ||
     dynsym.size % BigInt(width) !== 0n ||
+    // The table must hold at least its mandatory null symbol.
+    dynsym.size < BigInt(width) ||
     strings?.type !== SHT_STRTAB
   )
     throw new BinaryFormatFailure(
       "malformed",
-      "ELF dynamic symbol table entry size, length or string-table link is invalid",
+      "ELF dynamic symbol table entry size, length, null entry or string-table link is invalid",
     );
   const count = Number(dynsym.size / BigInt(width));
   rowBudget(count, "ELF dynamic symbol table");
@@ -364,17 +388,25 @@ const parseElfExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
   );
   let versions: number | null = null;
   if (versym !== undefined) {
-    if (versym.size === BigInt(count * 2))
+    try {
+      if (versym.size !== BigInt(count * 2))
+        throw new BinaryFormatFailure(
+          "malformed",
+          `Symbol version table has ${String(versym.size)} bytes for ${String(count)} symbols`,
+        );
       versions = reader.table(versym.offset, count, 2, "ELF symbol versions");
-    else
+    } catch (cause) {
+      // Keep every export; their versions become unknown.
       issues.push({
         code: "version_unresolved",
         location: hex(versym.offset),
-        message: `Symbol version table has ${String(versym.size)} bytes for ${String(count)} symbols`,
+        message: failureMessage(cause),
       });
+    }
   }
   const definitions = readVersionDefinitions(reader, sections, issues);
   const unresolvedVersions = new Set<number>();
+  const retain = createRetention();
   const exports: ElfExport[] = [];
   for (let index = 1; index < count; index++) {
     const at = table + index * width;
@@ -399,18 +431,19 @@ const parseElfExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
       const versionIndex = raw & 0x7fff;
       if (versionIndex === 0) continue;
       if (versionIndex >= 2) {
-        const name = definitions.get(versionIndex) ?? null;
+        const defined = definitions.get(versionIndex);
+        const name = defined === undefined || defined === "" ? null : defined;
         if (name === null && !unresolvedVersions.has(versionIndex)) {
           unresolvedVersions.add(versionIndex);
           issues.push({
             code: "version_unresolved",
             location: hex(symbol.value),
-            message: `Version index ${String(versionIndex)}, first used by symbol ${String(index)}, is named by no version definition`,
+            message: `Version index ${String(versionIndex)}, first used by symbol ${String(index)}, has no named version definition`,
           });
         }
         version = {
           index: versionIndex,
-          name: name === "" ? null : name,
+          name,
           hidden: (raw & 0x8000) !== 0,
         };
       }
@@ -434,6 +467,7 @@ const parseElfExports = (bytes: Buffer, artifact: Artifact): NativeExports => {
       });
       continue;
     }
+    retain(name, typeof version === "object" ? (version?.name ?? null) : null);
     exports.push({
       name,
       value: hex(symbol.value),

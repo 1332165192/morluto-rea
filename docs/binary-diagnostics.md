@@ -334,13 +334,17 @@ count and SHA-256.
   `"unknown"` when the version table cannot be read. A hidden version is not
   the default version that a by-name `dlsym` lookup selects.
 
-Unreadable names, out-of-range name ordinals, unreadable forwarders and
-unresolved version indexes are listed in `issues`, the affected entries are
-not reported, and coverage is `partial`. An ELF without section headers is
-`unsupported`: enumerating dynamic symbols from the dynamic segment is not
+Unreadable names, out-of-range name ordinals and unreadable forwarders are
+listed in `issues`, their entries are not reported, and coverage is `partial`.
+Unresolved symbol versions keep their rows: the version name is null for an
+index no definition names, and `version` is `"unknown"` when the version table
+cannot be read; coverage is likewise `partial`. A dynamic symbol table without
+its null entry is malformed. An ELF without section headers is `unsupported`:
+enumerating dynamic symbols from the dynamic segment is not
 implemented. Mach-O exports are reported by `inspect_macho`.
 
 `max_file_bytes` defaults to 256 MiB (maximum 512 MiB; CLI `--max-file-bytes`).
-An export or dynamic symbol table above 262144 entries fails without partial
-success. Export rows do not establish that a symbol is reachable, safe to call
+Export directories in PE headers are read like those in sections. An export or
+dynamic symbol table above 262144 entries, more than 262144 rows, or more than
+16 MiB of retained names fails without partial success. Export rows do not establish that a symbol is reachable, safe to call
 or loaded at runtime.

@@ -87,6 +87,11 @@ export const readPeImage = (bytes: Buffer): BinaryContainer => {
     return { virtual_address: reader.u32(entry), size: reader.u32(entry + 4) };
   });
   const imageBase = reader.word(optional + (bits === 64 ? 24 : 28), bits);
+  const headerMapping: FileMapping = {
+    address: imageBase,
+    offset: 0,
+    size: Math.min(reader.u32(optional + 60), bytes.length),
+  };
   const count = reader.u16(pe + 6);
   const start = reader.table(
     BigInt(optional + optionalSize),
@@ -157,6 +162,7 @@ export const readPeImage = (bytes: Buffer): BinaryContainer => {
     format: "pe",
     image_base: imageBase,
     pe_data_directories: dataDirectories,
+    pe_header_mapping: headerMapping,
     architecture: names.get(machine) ?? `pe-machine-${machine}`,
     bits,
     byte_order: "little",
