@@ -282,6 +282,82 @@ describe("ELF dynamic symbol exports", () => {
   });
 });
 
+describe("export inventory review regressions", () => {
+  it("reads an export directory stored in the PE headers", () => {
+    const result = parse(
+      peExportImage({
+        inHeaders: true,
+        functions: [{ rva: 0x2000 }, { forwarder: "OTHER.Target" }],
+        names: [
+          { name: "HeaderExport", index: 0 },
+          { name: "HeaderForward", index: 1 },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      export_directory: { rva: 0x200, dll_name: "fixture.dll" },
+      coverage: { status: "complete", exports: 2 },
+    });
+    expect(result.exports.map(({ name }) => name)).toEqual([
+      "HeaderExport",
+      "HeaderForward",
+    ]);
+  });
+
+  it("bounds retained name text before storing rows", () => {
+    // 300 rows naming one 60000-byte string retain about 18 MB of text.
+    const long = "n".repeat(60000);
+    const bytes = elfExportImage({
+      symbols: Array.from({ length: 300 }, () => ({ name: long })),
+    });
+
+    expect(bytes.length).toBeLessThan(100_000);
+    expect(() => parseNativeExports(bytes, artifact)).toThrow(
+      BinaryResourceFailure,
+    );
+  });
+
+  it("keeps exports when the version table lies outside the file", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [{ name: "a" }, { name: "b", version: 2 }],
+        versionDefinitions: ["lib.so", "V1"],
+        versionsOutsideFile: true,
+      }),
+    );
+
+    expect(
+      result.format === "elf" && result.exports.map(({ version }) => version),
+    ).toEqual(["unknown", "unknown"]);
+    expect(result.coverage.status).toBe("partial");
+  });
+
+  it("reports an empty version name as unresolved", () => {
+    const result = parse(
+      elfExportImage({
+        symbols: [{ name: "a", version: 2 }],
+        versionDefinitions: ["lib.so", ""],
+      }),
+    );
+
+    expect(
+      result.format === "elf" && result.exports.map(({ version }) => version),
+    ).toEqual([{ index: 2, name: null, hidden: false }]);
+    expect(result.issues).toMatchObject([{ code: "version_unresolved" }]);
+    expect(result.coverage.status).toBe("partial");
+  });
+
+  it("rejects a dynamic symbol table without its null entry", () => {
+    expect(() =>
+      parseNativeExports(
+        elfExportImage({ symbols: [], emptyDynamicSymbols: true }),
+        artifact,
+      ),
+    ).toThrow(BinaryFormatFailure);
+  });
+});
+
 it("refuses formats other than PE and ELF", () => {
   const macho = Buffer.alloc(64);
   macho.writeUInt32LE(0xfeedfacf, 0);
