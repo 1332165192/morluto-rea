@@ -6,10 +6,16 @@ import { PwntoolsLayoutProvider } from "../native/pwntools/PwntoolsLayoutProvide
 import { PeResourcesService } from "../application/binaryDiagnostics/PeResourcesService.js";
 import { PeResourcesProvider } from "../native/pe/PeResourcesProvider.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { NativeExportsService } from "../application/binaryDiagnostics/NativeExportsService.js";
+import { NativeExportsProvider } from "../native/exports/NativeExportsProvider.js";
 
 /** Portable PE inspection with no engine, installation or target acquisition. */
 export const createPeResourcesService = (): PeResourcesService =>
   new PeResourcesService(new PeResourcesProvider());
+
+/** Portable PE/ELF export tables with no engine, toolchain or target acquisition. */
+export const createNativeExportsService = (): NativeExportsService =>
+  new NativeExportsService(new NativeExportsProvider());
 
 /** Compose the offline adapter without import-time I/O or dependency acquisition. */
 export const createBinaryLayoutService = (

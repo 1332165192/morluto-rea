@@ -5,6 +5,7 @@ import {
   createRecordedCrashService,
   createBinaryLayoutService,
   createPeResourcesService,
+  createNativeExportsService,
 } from "../composition/binaryDiagnostics.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
@@ -14,6 +15,7 @@ import { withCommandCancellation } from "./commandCancellation.js";
 import { inspectBinaryLayoutInputSchema } from "../domain/native/binaryLayout.js";
 import { inspectRecordedCrashInputSchema } from "../domain/native/recordedCrash.js";
 import { inspectPeResourcesInputSchema } from "../domain/native/peResources.js";
+import { inspectNativeExportsInputSchema } from "../domain/native/nativeExports.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
@@ -90,6 +92,37 @@ export const registerBinaryDiagnosticsCommands = (
               pe,
               "rea-pe-resources",
               "inspect_pe_resources",
+              signal,
+            ),
+        );
+      }),
+  });
+  cli.command(CLI_COMMANDS.inspectNativeExports, {
+    description:
+      "Inspect a PE or ELF image's export table without executing it",
+    args: z.object({ path: z.string().describe("Local PE or ELF image") }),
+    options: z.object({
+      maxFileBytes: inspectNativeExportsInputSchema.shape.max_file_bytes,
+    }),
+    run: ({ args, options }) =>
+      withCommandCancellation(async (signal) => {
+        const exports = createNativeExportsService();
+        return await logCliCommand(
+          logger,
+          CLI_COMMANDS.inspectNativeExports,
+          async () =>
+            finishAnalysisCommand(
+              () =>
+                exports.inspect(
+                  {
+                    path: absoluteCallerPath(args.path),
+                    max_file_bytes: options.maxFileBytes,
+                  },
+                  { signal },
+                ),
+              exports,
+              "rea-native-exports",
+              "inspect_native_exports",
               signal,
             ),
         );
