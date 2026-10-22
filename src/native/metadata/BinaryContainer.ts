@@ -95,6 +95,11 @@ export interface BinaryContainer {
   readonly byte_order: "little" | "big";
   /** Declared PE preferred base, when available. */
   readonly image_base?: bigint;
+  /** PE optional-header data directories, indexed as declared. */
+  readonly pe_data_directories?: readonly {
+    readonly virtual_address: number;
+    readonly size: number;
+  }[];
   /** Mach-O load-command observation, when available. */
   readonly macho_chained_fixups?: boolean;
   readonly mappings: readonly FileMapping[];
