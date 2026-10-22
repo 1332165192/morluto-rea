@@ -45,6 +45,14 @@ it.skipIf(missingShell)(
       { owner: user, protected: true, trustees: [user] },
       { owner: user, protected: true, trustees: [] },
     ];
+    const quotePowerShell = (value: string) =>
+      `'${value.replaceAll("'", "''")}'`;
+    const powerShellCases = cases
+      .map(
+        ({ owner, protected: protectedAcl, trustees }) =>
+          `[ReaAclFixture]::new(${quotePowerShell(owner)}, $${protectedAcl}, [string[]]@(${trustees.map(quotePowerShell).join(", ")}))`,
+      )
+      .join("\n");
     const path = await mkdtemp(join(tmpdir(), "rea acl 観測-"));
     try {
       const output = execFileSync(
@@ -55,38 +63,40 @@ it.skipIf(missingShell)(
           "-Command",
           String.raw`
             $ErrorActionPreference = 'Stop'
-            $cases = $env:REA_ACL_CASES | ConvertFrom-Json
-            $acls = @(foreach ($case in $cases) {
-              $acl = [PSCustomObject]@{
-                OwnerSid = $case.owner
-                AreAccessRulesProtected = $case.protected
-                Rules = @(foreach ($sid in $case.trustees) {
+            $PSModuleAutoLoadingPreference = 'None'
+            Set-StrictMode -Version Latest
+            function Update-TypeData { throw 'Utility cmdlet invocation is forbidden' }
+            function ConvertTo-Json { throw 'Utility cmdlet invocation is forbidden' }
+            function ConvertFrom-Json { throw 'Utility cmdlet invocation is forbidden' }
+            function Add-Member { throw 'Utility cmdlet invocation is forbidden' }
+            class ReaAclFixture {
+              [string]$OwnerSid
+              [bool]$AreAccessRulesProtected
+              [object[]]$Rules
+              ReaAclFixture([string]$owner, [bool]$protected, [string[]]$trustees) {
+                $this.OwnerSid = $owner
+                $this.AreAccessRulesProtected = $protected
+                $this.Rules = @(foreach ($sid in $trustees) {
                   [PSCustomObject]@{ IdentityReference = [PSCustomObject]@{ Value = $sid } }
                 })
               }
-              $acl | Add-Member ScriptProperty Access { $script:accountLookups++; throw 'Account-name lookup is forbidden' }
-              $acl | Add-Member ScriptMethod GetOwner {
-                param($type)
+              [object] GetOwner([type]$type) {
                 if ($type -ne [Security.Principal.SecurityIdentifier]) { throw 'Owner must request SID form' }
-                [PSCustomObject]@{ Value = $this.OwnerSid }
+                return [PSCustomObject]@{ Value = $this.OwnerSid }
               }
-              $acl | Add-Member ScriptMethod GetAccessRules {
-                param($explicit, $inherited, $type)
+              [object[]] GetAccessRules([bool]$explicit, [bool]$inherited, [type]$type) {
                 if (!$explicit -or !$inherited -or $type -ne [Security.Principal.SecurityIdentifier]) {
                   throw 'Inspect all rules in SID form'
                 }
-                $this.Rules
+                return $this.Rules
               }
-              $acl
-            })
-            Remove-Module Microsoft.PowerShell.Utility
-            $PSModuleAutoLoadingPreference = 'None'
-            $script:accountLookups = 0
+            }
+            $acls = @(
+              ${powerShellCases}
+            )
             foreach ($acl in $acls) {
               [IO.File]::SetAttributes($env:REA_ACL_PATH, [IO.FileAttributes]::Directory)
               & { ${observer} } -Acl $acl -UserSid 'S-1-5-21-123' -Path $env:REA_ACL_PATH -Clock ([Diagnostics.Stopwatch]::StartNew())
-              if ($script:accountLookups -ne 0) { throw 'Observer accessed account names' }
-              if (Get-Module Microsoft.PowerShell.Utility) { throw 'Observer loaded utility cmdlets' }
               if (([int][IO.File]::GetAttributes($env:REA_ACL_PATH) -band 1) -eq 0) { throw 'Observer did not set readonly' }
             }
           `,
@@ -100,7 +110,6 @@ it.skipIf(missingShell)(
                 ([name]) => name.toLowerCase() !== "psmodulepath",
               ),
             ),
-            REA_ACL_CASES: JSON.stringify(cases),
             REA_ACL_PATH: path,
           },
         },

@@ -711,8 +711,9 @@ The Windows native verifier's private-runtime ACL observer reads SID rules once
 for both trustee validation and counting, using .NET APIs and a fixed JSON
 projection of booleans and a count. Module autoloading is disabled; the observer
 does not need PowerShell utility cmdlets or account-name resolution. A separate
-PowerShell regression checks the shared projection with utility cmdlets unloaded
-and an `Access` property that records and rejects account-name lookup. It covers
+PowerShell regression checks the shared projection with utility cmdlet traps
+and strict property access on a language-defined ACL fixture that has no `Access`
+convenience property. Fixture setup also avoids utility cmdlets. It covers
 foreign trustees, different owners, an unprotected DACL, and empty/single rules;
 these substitutes do not establish real Windows ACL behavior. The observer's
 `private-runtime-acl` stderr markers report completed phases and elapsed time;
