@@ -415,6 +415,15 @@ function implements a specific managed method.
 `verify_managed_native_boundaries` compares declared P/Invoke module and entry
 point identities with supplied native export or function evidence. Name/module
 matches establish declaration links; they do not establish that a call executed.
+
+Native observations may be `inspect_macho`, `analyze_function`, or
+`inspect_native_exports` Evidence. One `inspect_native_exports` record supplies
+a whole PE export directory or ELF dynamic symbol table, on any host. An exact
+name verifies only when it is what a by-name lookup binds: a PE export that
+forwards to another DLL, or an ELF symbol whose only version is hidden or whose
+version could not be read, is `inferred` with basis
+`qualified-export-candidate` and a limitation naming the reason. Ordinal-only
+PE exports have no name and match no declaration.
 When either side lacks a usable module identity, a matching name remains
 unresolved and retains the candidate evidence; REA reports a module mismatch
 only when both identities are available and differ.

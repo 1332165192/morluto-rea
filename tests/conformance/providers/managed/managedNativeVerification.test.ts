@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { verifyManagedNativeBoundariesEvidence } from "../../../../src/application/managed/ManagedNativeVerificationService.js";
@@ -12,6 +13,12 @@ import { managedNativeBoundaryInspectionSchema } from "../../../../src/domain/ma
 import { inspectMachoSchema } from "../../../../src/domain/native/nativeInspection.js";
 
 import { verifyManagedNativeBoundaries } from "../../../../src/domain/managed/managedNativeVerification.js";
+import { NATIVE_EXPORTS_PROVIDER } from "../../../../src/application/InvestigationProviders.js";
+import { parseNativeExports } from "../../../../src/native/exports/NativeExportParser.js";
+import {
+  elfExportImage,
+  peExportImage,
+} from "../../../fixtures/binaryDiagnostics/nativeExports.js";
 const exampleInput = () =>
   managedNativeVerificationInputSchema.parse(
     MANAGED_NATIVE_VERIFICATION_EXAMPLE,
@@ -476,4 +483,153 @@ it("does not treat a raw Mach-O ABI name as an exact underscored C identifier", 
     unresolved: 1,
   });
   expect(result.pinvoke_imports[0]?.candidates).toEqual([]);
+});
+
+describe("portable native export inventories", () => {
+  /** Managed Evidence declaring each name from `scope`, cloned from the example. */
+  const managedImports = (scope: string, names: readonly string[]) => {
+    const managed = exampleInput().managed_boundaries;
+    const normalized = managedNativeBoundaryInspectionSchema.parse(
+      managed.normalized_result,
+    );
+    const [template] = normalized.pinvoke_imports;
+    if (template === undefined) throw new Error("missing P/Invoke example");
+    return createEvidence(undefined, managed.provider, {
+      operation: managed.operation,
+      parameters: managed.parameters,
+      result: {
+        ...normalized,
+        pinvoke_imports: names.map((import_name, index) => ({
+          ...template,
+          token: `0x1c00000${String(index + 1)}`,
+          import_name,
+          import_scope_name: scope,
+        })),
+      },
+      rawResult: null,
+    });
+  };
+
+  const exportEvidence = (path: string, bytes: Buffer) => {
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const result = parseNativeExports(bytes, {
+      path,
+      sha256,
+      bytes: bytes.length,
+    });
+    return createEvidence(
+      { path, sha256, format: result.format },
+      NATIVE_EXPORTS_PROVIDER,
+      {
+        operation: "inspect_native_exports",
+        parameters: { path, max_file_bytes: 268435456 },
+        result,
+        confidence: "observed",
+        limitations: result.limitations,
+      },
+    );
+  };
+
+  const verify = (
+    scope: string,
+    names: readonly string[],
+    native: ReturnType<typeof exportEvidence>,
+  ) =>
+    new Map(
+      verifyManagedNativeBoundaries({
+        managed_boundaries: managedImports(scope, names),
+        native_observations: [native],
+      }).pinvoke_imports.map((item) => [item.managed.import_name, item]),
+    );
+
+  it("verifies exact ELF exports and keeps hidden or unread versions inferred", () => {
+    const elf = exportEvidence(
+      "/native/libfixture.so",
+      elfExportImage({
+        symbols: [
+          { name: "plain_fn" },
+          { name: "current_fn", version: 2 },
+          { name: "old_fn", version: 0x8003 },
+        ],
+        versionDefinitions: ["libfixture.so", "V2", "V1"],
+      }),
+    );
+    const results = verify(
+      "fixture",
+      ["plain_fn", "current_fn", "old_fn", "absent_fn"],
+      elf,
+    );
+
+    for (const name of ["plain_fn", "current_fn"])
+      expect(results.get(name)).toMatchObject({
+        status: "verified",
+        basis: "exact-export-name",
+        matched_native: {
+          name,
+          source: "elf-export",
+          evidence_id: elf.evidence_id,
+          module_path: "/native/libfixture.so",
+        },
+      });
+    expect(results.get("old_fn")).toMatchObject({
+      status: "inferred",
+      basis: "qualified-export-candidate",
+      matched_native: { export_qualifier: "non-default-version" },
+      limitations: [expect.stringContaining("hidden version")],
+    });
+    expect(results.get("absent_fn")).toMatchObject({
+      status: "unresolved",
+      basis: "no-native-candidate",
+    });
+
+    const unread = exportEvidence(
+      "/native/libfixture.so",
+      elfExportImage({
+        symbols: [{ name: "plain_fn" }],
+        versionDefinitions: ["libfixture.so"],
+        truncatedVersions: true,
+      }),
+    );
+    expect(
+      verify("fixture", ["plain_fn"], unread).get("plain_fn"),
+    ).toMatchObject({
+      status: "inferred",
+      matched_native: { export_qualifier: "unknown-version" },
+    });
+  });
+
+  it("verifies named PE exports and keeps forwarders inferred", () => {
+    const pe = exportEvidence(
+      "/native/fixture.dll",
+      peExportImage({
+        functions: [
+          { rva: 0x2000 },
+          { forwarder: "OTHER.Target" },
+          { rva: 0x2010 },
+        ],
+        names: [
+          { name: "Primary", index: 0 },
+          { name: "Forwarded", index: 1 },
+        ],
+      }),
+    );
+    const results = verify("fixture.dll", ["Primary", "Forwarded"], pe);
+
+    expect(results.get("Primary")).toMatchObject({
+      status: "verified",
+      basis: "exact-export-name",
+      matched_native: { source: "pe-export", address: "0x180002000" },
+    });
+    expect(results.get("Forwarded")).toMatchObject({
+      status: "inferred",
+      basis: "qualified-export-candidate",
+      matched_native: { export_qualifier: "forwarded", address: null },
+      limitations: [expect.stringContaining("forwards to another DLL")],
+    });
+    // A matching name under another module is a contradiction, not a match.
+    expect(verify("other.dll", ["Primary"], pe).get("Primary")).toMatchObject({
+      status: "contradicted",
+      basis: "module-mismatch",
+    });
+  });
 });

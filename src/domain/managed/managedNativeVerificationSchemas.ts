@@ -19,7 +19,20 @@ const nativeSymbolSchema = z.strictObject({
   address: z.string().nullable(),
   module_name: z.string().nullable(),
   module_path: z.string().nullable(),
-  source: z.enum(["macho-export", "function-dossier"]),
+  source: z.enum([
+    "macho-export",
+    "pe-export",
+    "elf-export",
+    "function-dossier",
+  ]),
+  /**
+   * Present when an exact export name does not establish what a by-name
+   * lookup binds: a PE forwarder, or an ELF symbol whose version is hidden
+   * or unreadable.
+   */
+  export_qualifier: z
+    .enum(["forwarded", "non-default-version", "unknown-version"])
+    .exactOptional(),
 });
 
 export type NativeSymbol = z.infer<typeof nativeSymbolSchema>;
@@ -64,7 +77,7 @@ export const pinvokeVerificationSchema = z.union([
   z.strictObject({
     ...pinvokeVerificationContextShape,
     status: z.literal("inferred"),
-    basis: z.literal("decorated-name-candidate"),
+    basis: z.enum(["decorated-name-candidate", "qualified-export-candidate"]),
     confidence: z.literal("inferred"),
     matched_native: nativeSymbolSchema,
     candidates: observedCandidatesSchema,

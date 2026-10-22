@@ -4,6 +4,10 @@ import { parseEvidence } from "../evidence.js";
 import { digestCanonicalValue } from "../canonicalDigest.js";
 import { functionDossierSchema } from "../hopperValues.js";
 import { inspectMachoSchema } from "../native/nativeInspection.js";
+import {
+  nativeExportsSchema,
+  type NativeExports,
+} from "../native/nativeExports.js";
 import type { ManagedNativeBoundaryInspection } from "./managedArtifact.js";
 import {
   pinvokeVerificationSchema,
@@ -47,6 +51,19 @@ const symbolsForEvidence = (
       })),
     };
   }
+  if (evidence.operation === "inspect_native_exports")
+    return {
+      supported: true,
+      symbols: nativeExportSymbols(
+        nativeExportsSchema.parse(evidence.normalized_result),
+      ).map((symbol) => ({
+        evidence_id: evidence.evidence_id,
+        operation: evidence.operation,
+        module_name: moduleName(evidence),
+        module_path: modulePath(evidence),
+        ...symbol,
+      })),
+    };
   if (evidence.operation === "analyze_function") {
     const dossier = functionDossierSchema.parse(evidence.normalized_result);
     return {
@@ -66,6 +83,36 @@ const symbolsForEvidence = (
   }
   return { supported: false, symbols: [] };
 };
+
+/** Named export rows; ordinal-only PE rows have no name to match. */
+const nativeExportSymbols = (
+  inventory: NativeExports,
+): Pick<NativeSymbol, "name" | "address" | "source" | "export_qualifier">[] =>
+  inventory.format === "pe"
+    ? inventory.exports.flatMap((row) =>
+        row.name === null
+          ? []
+          : [
+              {
+                name: row.name,
+                address: row.address,
+                source: "pe-export" as const,
+                ...(row.forwarder === null
+                  ? {}
+                  : { export_qualifier: "forwarded" as const }),
+              },
+            ],
+      )
+    : inventory.exports.map((row) => ({
+        name: row.name,
+        address: row.value,
+        source: "elf-export" as const,
+        ...(row.version === "unknown"
+          ? { export_qualifier: "unknown-version" as const }
+          : row.version?.hidden === true
+            ? { export_qualifier: "non-default-version" as const }
+            : {}),
+      }));
 
 export const collectNativeSymbols = (
   observations: readonly ManagedNativeVerificationInput["native_observations"][number][],
@@ -199,16 +246,21 @@ const matchPinvoke = (
 
   const candidates: [NativeSymbol, ...NativeSymbol[]] = [first, ...remaining];
   const scopeKnown = declaredModuleIdentity(managed.import_scope_name) !== null;
+  const exactName = (symbol: NativeSymbol) =>
+    managed.import_name === normalizedSymbolName(symbol) &&
+    moduleCompatible(managed.import_scope_name, symbol);
   const exact = candidates.find(
-    (symbol) =>
-      managed.import_name === normalizedSymbolName(symbol) &&
-      moduleCompatible(managed.import_scope_name, symbol),
+    (symbol) => exactName(symbol) && symbol.export_qualifier === undefined,
+  );
+  const qualified = candidates.find(
+    (symbol) => exactName(symbol) && symbol.export_qualifier !== undefined,
   );
   const decorated = candidates.find((symbol) =>
     moduleCompatible(managed.import_scope_name, symbol),
   );
   const selected =
     exact ??
+    qualified ??
     decorated ??
     (scopeKnown
       ? candidates.find((symbol) => !hasModuleIdentity(symbol))
@@ -219,10 +271,20 @@ const matchPinvoke = (
       match: {
         status: "verified",
         basis:
-          selected.source === "macho-export"
-            ? "exact-export-name"
-            : "exact-function-name",
+          selected.source === "function-dossier"
+            ? "exact-function-name"
+            : "exact-export-name",
         confidence: "observed",
+        matched_native: selected,
+        candidates,
+      },
+    };
+  if (qualified !== undefined)
+    return {
+      match: {
+        basis: "qualified-export-candidate",
+        status: "inferred",
+        confidence: "inferred",
         matched_native: selected,
         candidates,
       },
@@ -258,6 +320,15 @@ const matchPinvoke = (
   };
 };
 
+const QUALIFIED_EXPORT_LIMITATIONS = {
+  forwarded:
+    "The exactly named PE export forwards to another DLL, which was not inspected.",
+  "non-default-version":
+    "The exactly named ELF symbol has only a hidden version, which a by-name lookup does not select.",
+  "unknown-version":
+    "The exactly named ELF symbol's version could not be read, so whether a by-name lookup selects it is unknown.",
+} as const;
+
 const pinvokeLimitations = (
   match: PinvokeMatch,
   managed: PinvokeImport,
@@ -266,10 +337,14 @@ const pinvokeLimitations = (
   managed.import_scope_name.trim().length === 0
     ? ["Managed declaration does not name an import scope/module."]
     : []),
-  ...(match.status === "inferred"
+  ...(match.status === "inferred" && match.basis === "decorated-name-candidate"
     ? [
         "Native symbol matched a decorated candidate rather than the exact declared import name.",
       ]
+    : []),
+  ...(match.status === "inferred" &&
+  match.basis === "qualified-export-candidate"
+    ? [QUALIFIED_EXPORT_LIMITATIONS[match.matched_native.export_qualifier!]]
     : []),
   ...(match.status === "contradicted"
     ? [
