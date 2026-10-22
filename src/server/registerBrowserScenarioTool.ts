@@ -5,6 +5,12 @@ import {
   type OptionalProviderLoadFailure,
 } from "../application/OptionalObservationProviders.js";
 import { err } from "../domain/result.js";
+import type { EvidenceLookup } from "../application/EvidenceInputResolver.js";
+import {
+  requireAnalysisViewRetention,
+  summarizeRetainedAnalysis,
+} from "../application/analysisView/AnalysisViewService.js";
+import { analysisDetailSchema } from "../contracts/analysisDetail.js";
 
 import type { BrowserScenarioCapturePort } from "../application/BrowserScenarioCapturePort.js";
 import { captureBrowserScenario } from "../application/BrowserScenarioCaptureService.js";
@@ -23,6 +29,7 @@ interface BrowserScenarioToolRegistration {
   readonly loadFailure?: OptionalProviderLoadFailure | undefined;
   readonly provider: BrowserScenarioCapturePort | undefined;
   readonly recordEvidence: EvidenceWriter["recordEvidence"] | undefined;
+  readonly evidenceById?: EvidenceLookup | undefined;
   readonly withAdmittedAnalysis?: WithAdmittedAnalysis;
 }
 
@@ -36,20 +43,29 @@ export const registerBrowserScenarioTool = (
     contract.name,
     toolRegistrationOptions(contract),
     async (input, context) => {
-      const parsedScenario = browserScenarioSchema.safeParse(input);
-      if (!parsedScenario.success)
+      // Delivery detail is not part of the scenario or its recorded parameters.
+      const { detail: requestedDetail, ...scenarioInput } = input;
+      const parsedScenario = browserScenarioSchema.safeParse(scenarioInput);
+      const parsedDetail = analysisDetailSchema.safeParse(requestedDetail);
+      if (!parsedScenario.success || !parsedDetail.success) {
+        const issues = [
+          ...(parsedScenario.error?.issues ?? []),
+          ...(parsedDetail.error?.issues.map((issue) => ({
+            ...issue,
+            path: ["detail", ...issue.path],
+          })) ?? []),
+        ];
         return server.delivery.toCallToolResult(
           err(
-            analysisInputErrorFromIssues(
-              contract.name,
-              parsedScenario.error.issues,
-              input,
-              { cause: parsedScenario.error },
-            ),
+            analysisInputErrorFromIssues(contract.name, issues, input, {
+              cause: parsedScenario.error ?? parsedDetail.error,
+            }),
           ),
           contract,
         );
+      }
       const scenario = parsedScenario.data;
+      const detail = parsedDetail.data;
       if (options.loadFailure !== undefined)
         return server.delivery.toCallToolResult(
           err(optionalProviderUnavailable(options.loadFailure, contract.name)),
@@ -61,6 +77,19 @@ export const registerBrowserScenarioTool = (
         contract.name,
         context.mcpReq.signal,
         async () => {
+          const retention = {
+            recordEvidence: options.recordEvidence,
+            evidenceById: options.evidenceById,
+          };
+          // Refuse summary delivery before launching a browser that could not retain its Evidence.
+          if (detail === "summary") {
+            const ready = requireAnalysisViewRetention(
+              contract.name,
+              retention,
+            );
+            if (!ready.ok)
+              return server.delivery.toCallToolResult(ready, contract);
+          }
           const result = await logToolExecution(
             options.logger,
             contract.name,
@@ -71,7 +100,9 @@ export const registerBrowserScenarioTool = (
           );
           return deliverEvidenceResult(
             server,
-            result,
+            detail === "summary" && result.ok
+              ? summarizeRetainedAnalysis(result.value, retention)
+              : result,
             contract,
             options.recordEvidence,
           );

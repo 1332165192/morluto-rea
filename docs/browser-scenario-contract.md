@@ -293,6 +293,46 @@ external browser without closing it. The request itself defines the operation;
 there is no additional REA grant step. The browser and host still enforce their
 own access and process rules.
 
+## Summary delivery
+
+Multi-step scenarios that select accessibility trees, DOM or network events can
+produce results far larger than an MCP client accepts. Select
+`"detail": "summary"` (CLI: `--detail summary --evidence_output <bundle>`) to
+retain the complete Evidence and receive a compact view instead:
+
+- one row per step with its status, error, elapsed time and `after_url`;
+  `before_url` appears only when it differs from the previous step's
+  `after_url`, and sections are listed as captured, missing or truncated
+  (`not_requested` sections are omitted);
+- `final_accessibility`: the accessibility tree of the first failed or
+  cancelled step, or of the last step, falling back to the nearest earlier step
+  that captured one (`step_index` is `null` when none did);
+- retained event counts by kind, with the budget omissions, and network
+  transaction counts by origin, resource type and final status class.
+
+Page exact records from `normalized_result.parent_evidence_id` with
+`inspect_analysis_view`:
+
+```json
+{
+  "source": { "kind": "retained-evidence", "evidence_id": "ev_..." },
+  "view": {
+    "kind": "browser-scenario",
+    "collection": "steps",
+    "step_indices": [3],
+    "artifacts": ["dom"]
+  }
+}
+```
+
+Steps return only the captured sections named in `artifacts` and list the
+others with their state. Events (`"collection": "events"`) accept
+`step_indices`, `event_kinds` and `transaction_ids` and keep each event's
+original `item_index`. An omitted filter selects all records; `[]` selects
+none. Every page repeats the capture's completeness and dropped-event count:
+exhausting the pages does not make a truncated capture complete. The default
+`"detail": "complete"` keeps returning the whole capture inline.
+
 ## Network evidence
 
 `capture.events: ["network"]` retains request, response, completion, failure,

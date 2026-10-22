@@ -990,6 +990,7 @@ const registerObservationTools = ({
   });
   registerBrowserScenarioTool(server, {
     ...common,
+    evidenceById,
     provider: options.browserScenarioCapture,
     loadFailure: options.optionalProviderLoadFailures?.browserScenarioCapture,
   });

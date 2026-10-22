@@ -3,6 +3,11 @@ import { z } from "zod";
 
 import { captureBrowserScenario } from "./application/BrowserScenarioCaptureService.js";
 import { withCommandCancellation } from "./cli/commandCancellation.js";
+import {
+  analysisEvidenceDeliveryOptions,
+  cliEvidenceDeliveryInputError,
+  publishCliAnalysisEvidence,
+} from "./cli/analysisEvidenceDelivery.js";
 import { CLI_COMMANDS } from "./cliCommandNames.js";
 import { parseCliJsonInput, resolveCliJsonPaths } from "./cliJsonInput.js";
 import { logCliCommand } from "./cliLogging.js";
@@ -16,6 +21,7 @@ import type { JsonValue } from "./domain/jsonValue.js";
 import type { Logger } from "pino";
 
 const OPERATION = "capture_browser_scenario";
+const PROVIDER_ID = "rea-playwright-browser-scenario";
 
 /** Register the one-shot controlled browser scenario command. */
 export const registerBrowserScenarioCommands = (
@@ -36,9 +42,17 @@ export const registerBrowserScenarioCommands = (
         .string()
         .describe("Inline browser scenario JSON or JSON file path"),
     }),
-    run: ({ args }) =>
+    options: z.object(analysisEvidenceDeliveryOptions),
+    run: ({ args, options: delivery }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.captureBrowserScenario, async () => {
+          const deliveryError = cliEvidenceDeliveryInputError({
+            detail: delivery.detail,
+            evidenceOutput: delivery.evidence_output,
+            operation: OPERATION,
+          });
+          // Refuse undeliverable summaries before launching a browser.
+          if (deliveryError !== undefined) return cliError(deliveryError);
           const input = await parseCliJsonInput(args.inputJson, OPERATION);
           if (!input.ok) return input.error;
           const scenario = browserScenarioSchema.safeParse(
@@ -68,7 +82,6 @@ export const registerBrowserScenarioCommands = (
             result = await captureBrowserScenario(provider, scenario.data, {
               signal,
             });
-            return result.ok ? result.value : cliError(result.error);
           } finally {
             try {
               await provider?.close?.();
@@ -97,6 +110,14 @@ export const registerBrowserScenarioCommands = (
                 });
             }
           }
+          if (!result.ok) return cliError(result.error);
+          return publishCliAnalysisEvidence(result.value, {
+            providerId: PROVIDER_ID,
+            operation: OPERATION,
+            signal,
+            detail: delivery.detail,
+            evidenceOutput: delivery.evidence_output,
+          });
         }),
       ),
   });
